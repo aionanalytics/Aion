@@ -1,0 +1,11 @@
+{
+  "paths": {
+    "stock_daily": "stock_cache/daily",
+    "news": "news_cache",
+    "ml_data": "ml_data"
+  },
+  "training": {
+    "granularity": "weekly",
+    "targets": ["target_1w","target_2w","target_4w"]
+  }
+}
