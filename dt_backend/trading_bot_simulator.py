@@ -548,41 +548,40 @@ def run_all_bots(run_minutes: Optional[int] = None):
     log(f"🤖 SimTrader started — bots: {[b.name for b in bots]} | start_cash=${START_CASH:.2f}")
 
     loops = 0
-try:
-    while True:
-        # stop running completely outside market hours
-        if not is_market_open():
-            log("⏹ Market closed — stopping day-trading bots until next session.")
-            break
+    try:
+        while True:
+            # stop running completely outside market hours
+            if not is_market_open():
+                log("⏹ Market closed — stopping day-trading bots until next session.")
+                break
 
-        loops += 1
-        market_ok = _loop_once(bots)
+            loops += 1
+            market_ok = _loop_once(bots)
 
-        # Save equity checkpoint after each loop to keep logs responsive
-        if market_ok:
-            for bot in bots:
-                # top-of-loop equity snapshot already appended inside bot.step()
-                pass
+            # Save equity checkpoint after each loop to keep logs responsive
+            if market_ok:
+                for bot in bots:
+                    # top-of-loop equity snapshot already appended inside bot.step()
+                    pass
 
-        # bounded run (useful for tests) or forever
-        if run_minutes is not None and loops >= max(1, int(run_minutes)):
-            break
+            # bounded run (useful for tests) or forever
+            if run_minutes is not None and loops >= max(1, int(run_minutes)):
+                break
 
-        time.sleep(LOOP_SECONDS)
-except KeyboardInterrupt:
-    log("🛑 SimTrader interrupted by user.")
-except Exception as e:
-    log(f"⚠️ SimTrader crashed: {e}")
-finally:
-    log("✅ SimTrader loop ended (market closed or run complete).")
-
+            time.sleep(LOOP_SECONDS)
+    except KeyboardInterrupt:
+        log("🛑 SimTrader interrupted by user.")
+    except Exception as e:
+        log(f"⚠️ SimTrader crashed: {e}")
     finally:
+        log("✅ SimTrader loop ended (market closed or run complete).")
+
         # End-of-day (or end-of-run) logging + summary
         for bot in bots:
             if not bot.daily_equity:
                 # ensure at least one equity point
                 market = load_latest_bars(BARS_PATH)
-                price_map = {s: d.get("price") for s, d in (market or {}).items() if isinstance(d.get("price"), (int,float))}
+                price_map = {s: d.get("price") for s, d in (market or {}).items() if isinstance(d.get("price"), (int, float))}
                 bot.daily_equity.append((_now_utc_iso(), bot.equity(price_map)))
             _save_daily_log(bot, date_tag)
 
