@@ -30,7 +30,7 @@ def run_latest_drift(previous: str, latest: str) -> Optional[str]:
             from backend.backenddrift_monitor import run_drift_report  # type: ignore
         except Exception:
             # No drift module available at all
-            print(ℹ️ Drift monitor module not found — skipping drift check.")
+            print("ℹ️ Drift monitor module not found — skipping drift check.")
             return None
 
     # Attempt 2-argument signature
