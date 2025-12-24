@@ -1,0 +1,42 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime / generated
+logs/
+ml_data/
+ml_data_dt/
+data/
+data_cache/
+da_brains/
+insights/
+
+# Frontend (never tracked)
+frontend/
+node_modules/
+.next/
+dist/
+out/
+
+
+# Zips / archives
+*.zip
+
+# Data / runtime
+logs/
+ml_data/
+ml_data_dt/
+da_brains/
+data/
+data_cache/
+insights/
+
+Aion_Analytics/
+LEGACY/
+README_STORAGE_LAYOUT.md
+analytics/
+backend/.env
+dt_backend/rolling/
+tools/
+dt_backend/signals/
