@@ -11,10 +11,16 @@ uvicorn
 joblib
 pandas_ta
 yfinance
-torch
 praw
 snscrape
 pandas-datareader
 fredapi
+fastparquet
 tqdm
 transformers
+torch
+alpaca_trade_api
+python-dotenv
+requests
+schedule
+werkzeug
