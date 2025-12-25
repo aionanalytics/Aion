@@ -14,7 +14,6 @@ router = APIRouter(prefix="/admin/tools", tags=["admin-tools"])
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-# --- Paths ---
 SWING_REPLAY_STATE = PROJECT_ROOT / "data" / "replay" / "swing" / "replay_state.json"
 
 LOCK_PATHS = [
@@ -23,20 +22,23 @@ LOCK_PATHS = [
 ]
 
 
-# --- Logs ---
+# --------------------------------------------------
+# Logs
+# --------------------------------------------------
+
 @router.get("/logs")
 def get_logs(_: str = Depends(require_admin)):
-    return {
-        "lines": tail_lines(300)
-    }
+    return {"lines": tail_lines(300)}
 
 
-# --- Clear locks + reset replay state ---
+# --------------------------------------------------
+# Clear locks + reset replay
+# --------------------------------------------------
+
 @router.post("/clear-locks")
 def clear_locks(_: str = Depends(require_admin)):
     removed = []
 
-    # Remove lock files
     for lock_dir in LOCK_PATHS:
         if lock_dir.exists():
             for p in lock_dir.glob("*"):
@@ -46,7 +48,6 @@ def clear_locks(_: str = Depends(require_admin)):
                 except Exception:
                     pass
 
-    # Reset swing replay state
     if SWING_REPLAY_STATE.exists():
         clean_state = {
             "status": "idle",
@@ -67,7 +68,8 @@ def clear_locks(_: str = Depends(require_admin)):
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        with open(SWING_REPLAY_STATE, "w") as f:
+        SWING_REPLAY_STATE.parent.mkdir(parents=True, exist_ok=True)
+        with open(SWING_REPLAY_STATE, "w", encoding="utf-8") as f:
             json.dump(clean_state, f, indent=2)
 
     return {
@@ -77,19 +79,19 @@ def clear_locks(_: str = Depends(require_admin)):
     }
 
 
-# --- Git pull ---
+# --------------------------------------------------
+# Git pull
+# --------------------------------------------------
+
 @router.post("/git-pull")
 def git_pull(_: str = Depends(require_admin)):
     try:
         result = subprocess.check_output(
-            ["git", "pull"],
+            ["git", "pull", "origin", "main"],
             stderr=subprocess.STDOUT,
             text=True,
         )
     except subprocess.CalledProcessError as e:
         raise HTTPException(status_code=500, detail=e.output)
 
-    return {
-        "status": "ok",
-        "output": result,
-    }
+    return {"status": "ok", "output": result}

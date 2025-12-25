@@ -6,7 +6,7 @@ import threading
 import time
 from typing import Any, Dict
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 
 from backend.admin.auth import login_admin, issue_token, require_admin
 from backend.historical_replay_swing.job_manager import (

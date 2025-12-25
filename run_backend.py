@@ -121,10 +121,16 @@ if __name__ == "__main__":
             backend_host,
             "--port",
             str(backend_port),
+            "--access-log",
+            "false",
         ],
         "backend",
     )
-    threading.Thread(target=pipe_output, args=(backend_proc, "backend"), daemon=True).start()
+    threading.Thread(
+        target=pipe_output,
+        args=(backend_proc, "backend"),
+        daemon=True,
+    ).start()
 
     dt_proc = launch(
         [
@@ -136,10 +142,16 @@ if __name__ == "__main__":
             dt_host,
             "--port",
             str(dt_port),
+            "--access-log",
+            "false",
         ],
         "dt_backend",
     )
-    threading.Thread(target=pipe_output, args=(dt_proc, "dt_backend"), daemon=True).start()
+    threading.Thread(
+        target=pipe_output,
+        args=(dt_proc, "dt_backend"),
+        daemon=True,
+    ).start()
 
     dt_live_proc = launch(
         [
@@ -149,7 +161,11 @@ if __name__ == "__main__":
         ],
         "dt_backend_live_loop",
     )
-    threading.Thread(target=pipe_output, args=(dt_live_proc, "dt_backend_live_loop"), daemon=True).start()
+    threading.Thread(
+        target=pipe_output,
+        args=(dt_live_proc, "dt_backend_live_loop"),
+        daemon=True,
+    ).start()
 
     replay_proc = launch(
         [
@@ -161,10 +177,16 @@ if __name__ == "__main__":
             replay_host,
             "--port",
             str(replay_port),
+            "--access-log",
+            "false",
         ],
         "replay_service",
     )
-    threading.Thread(target=pipe_output, args=(replay_proc, "replay_service"), daemon=True).start()
+    threading.Thread(
+        target=pipe_output,
+        args=(replay_proc, "replay_service"),
+        daemon=True,
+    ).start()
 
     try:
         while True:
