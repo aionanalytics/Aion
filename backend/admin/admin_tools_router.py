@@ -1,3 +1,5 @@
+# /backend/admin/admin_tools_router.py
+
 from __future__ import annotations
 
 import subprocess
@@ -7,7 +9,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from backend.admin.auth import require_admin
+from backend.admin.deps import admin_required
 from utils.live_log import tail_lines
 
 router = APIRouter(prefix="/admin/tools", tags=["admin-tools"])
@@ -21,22 +23,20 @@ LOCK_PATHS = [
     PROJECT_ROOT / "data" / "replay" / "locks",
 ]
 
-
 # --------------------------------------------------
 # Logs
 # --------------------------------------------------
 
 @router.get("/logs")
-def get_logs(_: str = Depends(require_admin)):
+def get_logs(_: None = Depends(admin_required)):
     return {"lines": tail_lines(300)}
-
 
 # --------------------------------------------------
 # Clear locks + reset replay
 # --------------------------------------------------
 
 @router.post("/clear-locks")
-def clear_locks(_: str = Depends(require_admin)):
+def clear_locks(_: None = Depends(admin_required)):
     removed = []
 
     for lock_dir in LOCK_PATHS:
@@ -78,13 +78,12 @@ def clear_locks(_: str = Depends(require_admin)):
         "replay_state_reset": True,
     }
 
-
 # --------------------------------------------------
 # Git pull
 # --------------------------------------------------
 
 @router.post("/git-pull")
-def git_pull(_: str = Depends(require_admin)):
+def git_pull(_: None = Depends(admin_required)):
     try:
         result = subprocess.check_output(
             ["git", "pull", "origin", "main"],
