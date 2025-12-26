@@ -134,6 +134,7 @@ DT_PATHS: Dict[str, Path] = {
 
     "rolling_intraday_dir": DA_BRAINS / "intraday",
     # DT engine rolling (context/features/predictions/policy/execution)
+    "rolling": DA_BRAINS / "intraday" / "rolling_intraday.json.gz",
     "rolling_intraday_file": DA_BRAINS / "intraday" / "rolling_intraday.json.gz",
     # Live market bars rolling (written by live_market_data_loop only)
     "rolling_market_intraday_file": DA_BRAINS / "intraday" / "rolling_intraday_market.json.gz",
