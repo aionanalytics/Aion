@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.admin.deps import admin_required
+from backend.core.config import PATHS
 from utils.live_log import tail_lines
 
 router = APIRouter(prefix="/admin/tools", tags=["admin-tools"])
@@ -19,9 +20,22 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 from backend.historical_replay_swing.job_manager import REPLAY_STATE_PATH
 SWING_REPLAY_STATE = REPLAY_STATE_PATH
 
-LOCK_PATHS = [
+# ------------------------------------------------------------------
+# Lock locations (DIRECTORIES)
+# ------------------------------------------------------------------
+
+LOCK_DIRS = [
     PROJECT_ROOT / "data" / "locks",
     PROJECT_ROOT / "data" / "replay" / "locks",
+]
+
+# ------------------------------------------------------------------
+# Lock locations (EXPLICIT FILES)
+# ------------------------------------------------------------------
+
+LOCK_FILES = [
+    PATHS.get("nightly_lock"),        # da_brains/nightly_job.lock
+    PATHS.get("swing_replay_lock"),   # data/replay/swing/replay.lock
 ]
 
 # --------------------------------------------------
@@ -38,9 +52,19 @@ def get_logs(_: None = Depends(admin_required)):
 
 @router.post("/clear-locks")
 def clear_locks(_: None = Depends(admin_required)):
-    removed = []
+    removed: list[str] = []
 
-    for lock_dir in LOCK_PATHS:
+    # 1️⃣ Remove lock files
+    for lf in LOCK_FILES:
+        if lf and lf.exists():
+            try:
+                lf.unlink()
+                removed.append(str(lf))
+            except Exception:
+                pass
+
+    # 2️⃣ Remove locks inside known lock directories
+    for lock_dir in LOCK_DIRS:
         if lock_dir.exists():
             for p in lock_dir.glob("*"):
                 try:
@@ -49,6 +73,7 @@ def clear_locks(_: None = Depends(admin_required)):
                 except Exception:
                     pass
 
+    # 3️⃣ Reset replay state
     if SWING_REPLAY_STATE.exists():
         clean_state = {
             "status": "idle",
