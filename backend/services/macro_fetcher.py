@@ -1,25 +1,23 @@
-# backend/services/macro_fetcher.py — v1.4 (FRED + Alpaca(GLD) only for gold)
+# backend/services/macro_fetcher.py — v1.4
 """
-macro_fetcher.py — v1.4 (FRED-first; gold via Alpaca GLD; resilient + clear fields)
+macro_fetcher.py — v1.4 (FRED core + GOLD via Alpaca GLD; resilient; clear naming)
 
 Upgrades / fixes:
-  ✅ Clear naming: sp500_close/sp500_daily_pct/sp500_pct_decimal are canonical
-  ✅ Back-compat aliases preserved: spy_close/spy_daily_pct/spy_pct_decimal mirror SP500 proxy
-  ✅ HTTP debug: log status + body snippet when JSON is empty/bad (no more blindfold)
-  ✅ Robust parsing: choose last two *valid numeric* values within a window (default 90d),
-     skipping "." and blanks (avoids false "empty")
-  ✅ Gold via Alpaca ONLY (GLD daily bars), no FRED gold series dependency
-  ✅ Throttle: skip fetch if last macro_state.json is fresh (default 6h)
-  ✅ Retry with exponential backoff
-  ✅ Atomic writes
-  ✅ Writes canonical macro_state.json AND ml_data/market_state.json snapshot
-  ✅ Adds downstream aliases: vix, spy_pct, breadth (regime_detector-friendly)
+  ✅ Canonical fields renamed to sp500_close/sp500_* (clarity)
+     - Keeps legacy aliases spy_close/spy_* for downstream compatibility.
+  ✅ Better debugging when FRED returns junk:
+     - Logs HTTP status + small snippet for empty_or_bad_json cases.
+  ✅ Observation parsing is robust:
+     - Finds the last TWO valid numeric values within a lookback window (default 60 days),
+       skipping "." and blanks (so series with occasional missing values stop failing).
+  ✅ Gold is fetched via Alpaca GLD daily bars (only for gold), not FRED, not yfinance.
+     - Uses timeframe=1Day over a wider date range so it works outside market hours.
+  ✅ Throttle + retries + atomic writes + do-not-overwrite-on-failure remain.
 
 Notes:
-  • We use FRED "SP500" index level, not the SPY ETF.
-    - Canonical fields are sp500_*
-    - Legacy spy_* fields are aliases to keep old code working.
-  • Gold is proxied via GLD ETF daily bars from Alpaca Market Data.
+  • FRED provides index/yield style series; they are not ETFs. That’s fine for regime math.
+  • Alpaca GLD is an ETF proxy for gold price; if your Alpaca data feed can’t serve GLD,
+    you’ll see empty bars and we’ll log it clearly.
 """
 
 from __future__ import annotations
@@ -37,15 +35,13 @@ from backend.core.data_pipeline import log, safe_float
 
 
 # ------------------------------------------------------------
-# Config knobs (env)
+# Env helpers
 # ------------------------------------------------------------
 
 def _env_float(name: str, default: float) -> float:
     try:
         v = str(os.getenv(name, "")).strip()
-        if not v:
-            return float(default)
-        return float(v)
+        return float(v) if v else float(default)
     except Exception:
         return float(default)
 
@@ -53,9 +49,7 @@ def _env_float(name: str, default: float) -> float:
 def _env_int(name: str, default: int) -> int:
     try:
         v = str(os.getenv(name, "")).strip()
-        if not v:
-            return int(default)
-        return int(float(v))
+        return int(float(v)) if v else int(default)
     except Exception:
         return int(default)
 
@@ -71,26 +65,31 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return default
 
 
+# ------------------------------------------------------------
+# Config knobs (env)
+# ------------------------------------------------------------
+
 MACRO_MIN_REFRESH_HOURS = _env_float("AION_MACRO_MIN_REFRESH_HOURS", 6.0)
 MACRO_MAX_RETRIES = _env_int("AION_MACRO_MAX_RETRIES", 3)
 MACRO_RETRY_BASE_SEC = _env_float("AION_MACRO_RETRY_BASE_SEC", 10.0)
 MACRO_FORCE = _env_bool("AION_MACRO_FORCE", False)
 
-# Robust value scanning window for FRED series (days)
-FRED_LOOKBACK_DAYS = _env_int("AION_FRED_LOOKBACK_DAYS", 90)
+# How far back to look for last-two valid numeric observations
+FRED_LOOKBACK_DAYS = _env_int("AION_FRED_LOOKBACK_DAYS", 60)
 
 FRED_API_KEY = (os.getenv("FRED_API", "") or "").strip()
 
-# Alpaca keys (gold-only via GLD)
-ALPACA_KEY_ID = (os.getenv("ALPACA_API_KEY_ID", "") or "").strip()
+# Alpaca (for GLD only)
+ALPACA_KEY = (os.getenv("ALPACA_API_KEY_ID", "") or "").strip()
 ALPACA_SECRET = (os.getenv("ALPACA_API_SECRET_KEY", "") or "").strip()
-
-# Alpaca market data base
-ALPACA_DATA_BASE = (os.getenv("ALPACA_DATA_BASE_URL", "") or "").strip() or "https://data.alpaca.markets"
+# Data base URL (market data). Default is Alpaca's standard data host.
+ALPACA_DATA_BASE_URL = (os.getenv("ALPACA_DATA_BASE_URL", "") or "").strip() or "https://data.alpaca.markets"
+# Optional feed selector: "" (omit), "iex", or "sip" depending on your subscription.
+ALPACA_DATA_FEED = (os.getenv("AION_ALPACA_DATA_FEED", "") or "").strip().lower()
 
 
 # ------------------------------------------------------------
-# Atomic write helper
+# Atomic write + cache helpers
 # ------------------------------------------------------------
 
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -111,6 +110,10 @@ def _read_json_if_exists(path: Path) -> Optional[Dict[str, Any]]:
 
 
 def _is_fresh(path: Path, max_age_hours: float) -> bool:
+    """
+    This is the exact logic for "skip if it's < N hours old":
+        return age_s < max_age_hours * 3600
+    """
     try:
         if not path.exists():
             return False
@@ -121,67 +124,125 @@ def _is_fresh(path: Path, max_age_hours: float) -> bool:
 
 
 # ------------------------------------------------------------
-# HTTP helpers (stdlib-only) with debug
+# HTTP helper (stdlib, logs status/snippet)
 # ------------------------------------------------------------
 
-def _http_get_text(url: str, timeout_s: float = 20.0) -> Tuple[Optional[int], str, str]:
+def _http_get_text(url: str, timeout_s: float = 20.0) -> Tuple[Optional[int], str]:
     """
-    Returns (status_code, body_text, content_type).
-    On hard failure returns (None, "", "").
+    Returns (status_code, body_text).
+    On some failures, status_code may be None.
     """
-    try:
-        import urllib.request
-        import urllib.error
+    import urllib.request
+    import urllib.error
 
+    try:
         req = urllib.request.Request(
             url,
             headers={
                 "User-Agent": "AION-Analytics/1.0 (macro_fetcher)",
-                "Accept": "application/json",
+                "Accept": "application/json,text/plain;q=0.9,*/*;q=0.8",
             },
         )
-
         with urllib.request.urlopen(req, timeout=float(timeout_s)) as resp:
             status = getattr(resp, "status", None)
-            ctype = str(resp.headers.get("Content-Type") or "")
-            body = resp.read().decode("utf-8", errors="ignore")
-            return (int(status) if status is not None else None, body, ctype)
-
+            data = resp.read().decode("utf-8", errors="ignore")
+            return (int(status) if status is not None else 200), data
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8", errors="ignore")
+        except Exception:
+            body = ""
+        return int(getattr(e, "code", 0) or 0), body
     except Exception:
-        return (None, "", "")
+        return None, ""
 
 
-def _json_loads_safe(s: str) -> Optional[Dict[str, Any]]:
+def _http_get_json(url: str, timeout_s: float = 20.0) -> Tuple[Optional[int], Optional[Dict[str, Any]], str]:
+    """
+    Returns (status_code, parsed_json_dict_or_none, snippet_for_logs)
+    """
+    status, body = _http_get_text(url, timeout_s=timeout_s)
+    snippet = (body or "").strip().replace("\n", " ")[:240]
+    if not body:
+        return status, None, snippet
     try:
-        obj = json.loads(s)
-        return obj if isinstance(obj, dict) else None
+        js = json.loads(body)
+        return status, js if isinstance(js, dict) else None, snippet
     except Exception:
-        return None
-
-
-def _snippet(s: str, n: int = 220) -> str:
-    ss = (s or "").replace("\n", " ").replace("\r", " ").strip()
-    if len(ss) <= n:
-        return ss
-    return ss[:n] + "…"
+        return status, None, snippet
 
 
 # ------------------------------------------------------------
 # FRED helpers
 # ------------------------------------------------------------
 
-def _fred_obs_url(series_id: str, *, observation_start: str, limit: int) -> str:
+def _fred_observations(series_id: str, lookback_days: int, limit: int = 200) -> List[Dict[str, Any]]:
+    """
+    Fetch observations (newest first) within a recent window.
+    Retries with exponential backoff and logs status/snippet on bad JSON.
+    """
+    if not FRED_API_KEY:
+        return []
+
     base = "https://api.stlouisfed.org/fred/series/observations"
-    # sort desc so newest are first; we then scan for last 2 valid numeric values
-    return (
-        f"{base}"
+    start_date = (datetime.now(timezone.utc) - timedelta(days=max(7, int(lookback_days)))).date().isoformat()
+
+    params = (
         f"?series_id={series_id}"
         f"&api_key={FRED_API_KEY}"
         f"&file_type=json"
         f"&sort_order=desc"
-        f"&observation_start={observation_start}"
+        f"&observation_start={start_date}"
         f"&limit={max(1, int(limit))}"
     )
+    url = base + params
+
+    last_err = None
+    last_status: Optional[int] = None
+    last_snip: str = ""
+
+    for attempt in range(1, max(1, MACRO_MAX_RETRIES) + 1):
+        try:
+            status, js, snip = _http_get_json(url, timeout_s=20.0)
+            last_status, last_snip = status, snip
+
+            if not js or "observations" not in js:
+                # If FRED returns an error payload, surface it.
+                meta_err = ""
+                try:
+                    if isinstance(js, dict) and ("error_message" in js or "error_code" in js):
+                        meta_err = f" error_code={js.get('error_code')} error_message={js.get('error_message')}"
+                except Exception:
+                    pass
+
+                raise RuntimeError(f"empty_or_bad_json (status={status}{meta_err} snippet='{snip}')")
+
+            obs = js.get("observations") or []
+            if not isinstance(obs, list):
+                raise RuntimeError(f"bad_observations_schema (status={status} snippet='{snip}')")
+
+            return [o for o in obs if isinstance(o, dict)]
+
+        except Exception as e:
+            last_err = str(e)
+
+        if attempt < MACRO_MAX_RETRIES:
+            base_s = float(MACRO_RETRY_BASE_SEC) * (2 ** (attempt - 1))
+            jitter = random.uniform(0.0, 0.25 * base_s)
+            sleep_s = min(180.0, base_s + jitter)
+            log(f"[macro_fetcher] ⚠️ FRED fetch {series_id} attempt {attempt}/{MACRO_MAX_RETRIES} failed: {last_err} — sleeping {sleep_s:.1f}s")
+            try:
+                time.sleep(sleep_s)
+            except Exception:
+                pass
+
+    # Final failure log with status/snippet context
+    if last_err:
+        log(f"[macro_fetcher] ⚠️ FRED fetch {series_id} failed after retries: {last_err}")
+    else:
+        log(f"[macro_fetcher] ⚠️ FRED fetch {series_id} failed after retries: unknown_error (status={last_status} snippet='{last_snip}')")
+
+    return []
 
 
 def _parse_fred_value(v: Any) -> Optional[float]:
@@ -195,70 +256,125 @@ def _parse_fred_value(v: Any) -> Optional[float]:
         x = float(s)
         if x != x:
             return None
-        return float(x)
+        return x
     except Exception:
         return None
 
 
-def _fred_last2_valid(series_id: str) -> Tuple[float, float, Dict[str, Any]]:
+def _last2_from_fred(series_id: str, lookback_days: int) -> Tuple[float, float]:
     """
-    Returns (last_value, pct_change_vs_prev, meta_debug).
-
-    Strategy:
-      - Request up to ~200 observations over the last FRED_LOOKBACK_DAYS
-      - Scan newest->older and pick the first 2 valid numeric values
-      - Compute pct change
+    Returns (last_value, pct_change_vs_prev) where pct is percent.
+    Robust: scans newest->older within lookback window and picks last two valid numbers.
     """
-    if not FRED_API_KEY:
-        return 0.0, 0.0, {"err": "missing_fred_key"}
+    obs = _fred_observations(series_id, lookback_days=lookback_days, limit=250)
 
-    start_dt = datetime.now(timezone.utc) - timedelta(days=max(7, int(FRED_LOOKBACK_DAYS)))
-    observation_start = start_dt.date().isoformat()
+    vals: List[float] = []
+    for o in obs:
+        x = _parse_fred_value(o.get("value"))
+        if x is None:
+            continue
+        vals.append(float(x))
+        if len(vals) >= 2:
+            break
 
-    url = _fred_obs_url(series_id, observation_start=observation_start, limit=200)
+    if len(vals) < 1:
+        return 0.0, 0.0
+    if len(vals) < 2:
+        return float(vals[0]), 0.0
+
+    last = float(vals[0])
+    prev = float(vals[1])
+    if prev == 0:
+        return last, 0.0
+    pct = ((last - prev) / prev) * 100.0
+    return last, float(pct)
+
+
+# ------------------------------------------------------------
+# Alpaca GLD helper (daily bars, wide window)
+# ------------------------------------------------------------
+
+def _alpaca_last2_close(symbol: str = "GLD", lookback_days: int = 60) -> Tuple[float, float]:
+    """
+    Fetch last two daily closes for GLD from Alpaca market data.
+    Returns (close, pct_change_percent). On failure returns (0.0, 0.0).
+
+    If your account/feed cannot serve GLD, Alpaca may return {"bars":{}}.
+    We log status + snippet so you can tell if it's feed-permission vs param error.
+    """
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        log("[macro_fetcher] ⚠️ Alpaca keys missing; cannot fetch GLD.")
+        return 0.0, 0.0
+
+    start = (datetime.now(timezone.utc) - timedelta(days=max(10, int(lookback_days)))).isoformat().replace("+00:00", "Z")
+
+    # Alpaca bars endpoint (v2)
+    url = (
+        f"{ALPACA_DATA_BASE_URL}/v2/stocks/bars"
+        f"?symbols={symbol}"
+        f"&timeframe=1Day"
+        f"&start={start}"
+        f"&limit=1000"
+        f"&adjustment=raw"
+    )
+    if ALPACA_DATA_FEED in {"iex", "sip"}:
+        url += f"&feed={ALPACA_DATA_FEED}"
+
     last_err: Optional[str] = None
-    last_status: Optional[int] = None
-    last_snip: str = ""
 
     for attempt in range(1, max(1, MACRO_MAX_RETRIES) + 1):
         try:
-            status, body, ctype = _http_get_text(url, timeout_s=20.0)
-            last_status = status
-            last_snip = _snippet(body)
+            import urllib.request
+            import urllib.error
 
-            js = _json_loads_safe(body)
-            if not js or "observations" not in js:
-                # Log WHY it’s bad: status + snippet
-                last_err = "empty_or_bad_json"
-                raise RuntimeError(last_err)
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "APCA-API-KEY-ID": ALPACA_KEY,
+                    "APCA-API-SECRET-KEY": ALPACA_SECRET,
+                    "Accept": "application/json",
+                    "User-Agent": "AION-Analytics/1.0 (macro_fetcher alpaca)",
+                },
+            )
 
-            obs = js.get("observations") or []
-            if not isinstance(obs, list):
-                last_err = "bad_observations_schema"
-                raise RuntimeError(last_err)
+            with urllib.request.urlopen(req, timeout=20.0) as resp:
+                status = getattr(resp, "status", 200)
+                body = resp.read().decode("utf-8", errors="ignore")
 
-            vals: List[float] = []
-            for o in obs:
-                if not isinstance(o, dict):
+            snippet = (body or "").strip().replace("\n", " ")[:240]
+
+            js = json.loads(body) if body else {}
+            bars = (js or {}).get("bars") or {}
+
+            if not isinstance(bars, dict) or not bars:
+                raise RuntimeError(f"no_valid_closes (status={status} snippet='{snippet}')")
+
+            series = bars.get(symbol) or bars.get(symbol.upper()) or bars.get(symbol.lower()) or []
+            if not isinstance(series, list) or not series:
+                raise RuntimeError(f"no_valid_closes (status={status} snippet='{snippet}')")
+
+            # Extract closes, sort by time, take last two valid
+            closes: List[Tuple[str, float]] = []
+            for b in series:
+                if not isinstance(b, dict):
                     continue
-                x = _parse_fred_value(o.get("value"))
-                if x is None:
+                t = str(b.get("t") or "")
+                c = b.get("c")
+                try:
+                    cf = float(c)
+                    if cf > 0:
+                        closes.append((t, cf))
+                except Exception:
                     continue
-                vals.append(float(x))
-                if len(vals) >= 2:
-                    break
 
-            if len(vals) < 1:
-                last_err = "no_numeric_values_in_window"
-                raise RuntimeError(last_err)
+            if len(closes) < 2:
+                raise RuntimeError(f"no_valid_closes (status={status} snippet='{snippet}')")
 
-            last = float(vals[0])
-            prev = float(vals[1]) if len(vals) >= 2 else 0.0
-            if prev == 0.0:
-                return last, 0.0, {"status": status, "series": series_id, "window_days": FRED_LOOKBACK_DAYS}
-
-            pct = ((last - prev) / prev) * 100.0
-            return last, float(pct), {"status": status, "series": series_id, "window_days": FRED_LOOKBACK_DAYS}
+            closes.sort(key=lambda x: x[0])  # oldest -> newest
+            prev = float(closes[-2][1])
+            last = float(closes[-1][1])
+            pct = ((last - prev) / prev) * 100.0 if prev > 0 else 0.0
+            return last, float(pct)
 
         except Exception as e:
             last_err = str(e)
@@ -267,140 +383,14 @@ def _fred_last2_valid(series_id: str) -> Tuple[float, float, Dict[str, Any]]:
             base_s = float(MACRO_RETRY_BASE_SEC) * (2 ** (attempt - 1))
             jitter = random.uniform(0.0, 0.25 * base_s)
             sleep_s = min(180.0, base_s + jitter)
-            log(
-                f"[macro_fetcher] ⚠️ FRED fetch {series_id} attempt {attempt}/{MACRO_MAX_RETRIES} failed: "
-                f"{last_err} (status={last_status} snippet='{last_snip}') — sleeping {sleep_s:.1f}s"
-            )
+            log(f"[macro_fetcher] ⚠️ Alpaca({symbol}) attempt {attempt}/{MACRO_MAX_RETRIES} failed: {last_err} — sleeping {sleep_s:.1f}s")
             try:
                 time.sleep(sleep_s)
             except Exception:
                 pass
 
-    log(
-        f"[macro_fetcher] ⚠️ FRED fetch {series_id} failed after retries: {last_err} "
-        f"(status={last_status} snippet='{last_snip}')"
-    )
-    return 0.0, 0.0, {"err": last_err, "status": last_status, "snippet": last_snip, "series": series_id}
-
-
-# ------------------------------------------------------------
-# Alpaca (gold-only via GLD)
-# ------------------------------------------------------------
-
-def _alpaca_last2_daily_close(symbol: str = "GLD") -> Tuple[float, float, Dict[str, Any]]:
-    """
-    Fetch last two daily bars via Alpaca Market Data and compute pct.
-
-    We keep this *gold-only* by design.
-    """
-    if not (ALPACA_KEY_ID and ALPACA_SECRET):
-        return 0.0, 0.0, {"err": "missing_alpaca_keys"}
-
-    sym = (symbol or "").strip().upper()
-    if not sym:
-        return 0.0, 0.0, {"err": "bad_symbol"}
-
-    # Request a small window so we can skip any missing days and still find last 2 closes.
-    # feed=iex is usable without a subscription (good for nightly macro). :contentReference[oaicite:1]{index=1}
-    url = (
-        f"{ALPACA_DATA_BASE}/v2/stocks/bars"
-        f"?symbols={sym}"
-        f"&timeframe=1Day"
-        f"&limit=20"
-        f"&adjustment=raw"
-        f"&feed=iex"
-    )
-
-    last_err: Optional[str] = None
-    last_status: Optional[int] = None
-    last_snip: str = ""
-
-    for attempt in range(1, max(1, MACRO_MAX_RETRIES) + 1):
-        try:
-            import urllib.request
-
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "APCA-API-KEY-ID": ALPACA_KEY_ID,
-                    "APCA-API-SECRET-KEY": ALPACA_SECRET,
-                    "Accept": "application/json",
-                    "User-Agent": "AION-Analytics/1.0 (macro_fetcher)",
-                },
-            )
-
-            with urllib.request.urlopen(req, timeout=20.0) as resp:
-                last_status = int(getattr(resp, "status", 0) or 0)
-                body = resp.read().decode("utf-8", errors="ignore")
-                last_snip = _snippet(body)
-
-            js = _json_loads_safe(body)
-            if not js:
-                last_err = "empty_or_bad_json"
-                raise RuntimeError(last_err)
-
-            # Response shapes vary; handle both:
-            #   {"bars": {"GLD": [ ... ]}}
-            #   {"bars": [ ... ]}
-            bars_obj = js.get("bars")
-            bars_list: List[Dict[str, Any]] = []
-
-            if isinstance(bars_obj, dict):
-                got = bars_obj.get(sym)
-                if isinstance(got, list):
-                    bars_list = [b for b in got if isinstance(b, dict)]
-            elif isinstance(bars_obj, list):
-                bars_list = [b for b in bars_obj if isinstance(b, dict)]
-
-            # Need last 2 closes (bars often newest->oldest? not guaranteed). Sort by time if present.
-            def _t_key(b: Dict[str, Any]) -> str:
-                return str(b.get("t") or b.get("timestamp") or "")
-
-            bars_list = sorted(bars_list, key=_t_key)  # oldest->newest
-
-            closes: List[float] = []
-            for b in reversed(bars_list):  # newest->older
-                c = b.get("c") if "c" in b else b.get("close")
-                try:
-                    x = float(c)
-                    if x > 0 and x == x:
-                        closes.append(x)
-                except Exception:
-                    pass
-                if len(closes) >= 2:
-                    break
-
-            if len(closes) < 1:
-                last_err = "no_valid_closes"
-                raise RuntimeError(last_err)
-
-            last = float(closes[0])
-            prev = float(closes[1]) if len(closes) >= 2 else 0.0
-            pct = ((last - prev) / prev) * 100.0 if prev > 0 else 0.0
-
-            return last, float(pct), {"status": last_status, "symbol": sym, "source": "alpaca"}
-
-        except Exception as e:
-            last_err = str(e)
-
-        if attempt < MACRO_MAX_RETRIES:
-            base_s = float(MACRO_RETRY_BASE_SEC) * (2 ** (attempt - 1))
-            jitter = random.uniform(0.0, 0.25 * base_s)
-            sleep_s = min(120.0, base_s + jitter)
-            log(
-                f"[macro_fetcher] ⚠️ Alpaca(GLD) attempt {attempt}/{MACRO_MAX_RETRIES} failed: "
-                f"{last_err} (status={last_status} snippet='{last_snip}') — sleeping {sleep_s:.1f}s"
-            )
-            try:
-                time.sleep(sleep_s)
-            except Exception:
-                pass
-
-    log(
-        f"[macro_fetcher] ⚠️ Alpaca(GLD) failed after retries: {last_err} "
-        f"(status={last_status} snippet='{last_snip}')"
-    )
-    return 0.0, 0.0, {"err": last_err, "status": last_status, "snippet": last_snip, "source": "alpaca"}
+    log(f"[macro_fetcher] ⚠️ Alpaca({symbol}) failed after retries: {last_err}")
+    return 0.0, 0.0
 
 
 # ------------------------------------------------------------
@@ -410,12 +400,12 @@ def _alpaca_last2_daily_close(symbol: str = "GLD") -> Tuple[float, float, Dict[s
 def _macro_looks_sane(m: Dict[str, Any]) -> bool:
     """
     Consider macro sane if we have at least some real signal.
-    Most important: sp500_close should not be zero.
+    Most important: SP500 should not be zero.
     Prefer VIX too, but don't brick everything if only VIX fails.
     """
     try:
-        spx = abs(safe_float(m.get("sp500_close", 0.0)))
-        if spx <= 0.0:
+        sp500 = abs(safe_float(m.get("sp500_close", 0.0)))
+        if sp500 <= 0.0:
             return False
 
         vix = abs(safe_float(m.get("vix_close", 0.0)))
@@ -434,11 +424,11 @@ def _macro_looks_sane(m: Dict[str, Any]) -> bool:
 # Risk-off (kept stable)
 # ------------------------------------------------------------
 
-def _risk_off_score(vix_close: float, spy_pct_dec: float, dxy_pct_dec: float) -> float:
+def _risk_off_score(vix_close: float, sp500_pct_dec: float, dxy_pct_dec: float) -> float:
     vix_component = min(max((vix_close - 15.0) / 25.0, 0.0), 1.0)      # 15..40 mapped
-    spy_component = min(max((-spy_pct_dec) / 0.03, 0.0), 1.0)          # -3% maps to 1
-    dxy_component = min(max((dxy_pct_dec) / 0.01, 0.0), 1.0)           # +1% maps to 1
-    return float(min(1.0, 0.45 * vix_component + 0.45 * spy_component + 0.10 * dxy_component))
+    spx_component = min(max((-sp500_pct_dec) / 0.03, 0.0), 1.0)         # -3% maps to 1
+    dxy_component = min(max((dxy_pct_dec) / 0.01, 0.0), 1.0)            # +1% maps to 1
+    return float(min(1.0, 0.45 * vix_component + 0.45 * spx_component + 0.10 * dxy_component))
 
 
 # ------------------------------------------------------------
@@ -448,12 +438,11 @@ def _risk_off_score(vix_close: float, spy_pct_dec: float, dxy_pct_dec: float) ->
 def build_macro_features() -> Dict[str, Any]:
     log("🌐 Fetching macro signals via FRED (+ gold via Alpaca GLD)…")
 
-    # canonical destination
     out_path = PATHS.get("macro_state")
     if not isinstance(out_path, Path):
         out_path = None
 
-    # If no FRED key, best-effort return cached
+    # Missing FRED key => return cache if possible
     if not FRED_API_KEY:
         log("[macro_fetcher] ❌ FRED_API key missing. Set FRED_API in .env.")
         if out_path:
@@ -462,7 +451,7 @@ def build_macro_features() -> Dict[str, Any]:
                 return {"status": "skipped", "reason": "missing_fred_key_return_cache", "macro_state": cached}
         return {"status": "error", "error": "missing_fred_api_key"}
 
-    # Throttle: if we have a recent macro_state.json, skip fetch unless forced
+    # Throttle: skip fetch if fresh unless forced
     if (not MACRO_FORCE) and out_path and _is_fresh(out_path, MACRO_MIN_REFRESH_HOURS):
         cached = _read_json_if_exists(out_path)
         if cached:
@@ -471,29 +460,29 @@ def build_macro_features() -> Dict[str, Any]:
 
     # --- FRED series map ---
     SERIES = {
-        "vix": "VIXCLS",       # CBOE Volatility Index
-        "sp500": "SP500",      # S&P 500 index level (NOT SPY)
-        "nasdaq": "NASDAQCOM", # NASDAQ Composite
-        "tnx": "DGS10",        # 10Y Treasury constant maturity rate (%)
-        "dxy": "DTWEXBGS",     # Trade weighted USD index (broad)
-        "uso": "DCOILWTICO",   # WTI oil
+        "vix": "VIXCLS",         # CBOE Volatility Index
+        "sp500": "SP500",        # S&P 500 Index level
+        "nasdaq": "NASDAQCOM",   # NASDAQ Composite Index level
+        "tnx": "DGS10",          # 10Y Treasury constant maturity rate (%)
+        "dxy": "DTWEXBGS",       # Trade Weighted U.S. Dollar Index: Broad
+        "uso": "DCOILWTICO",     # WTI crude oil price
     }
 
-    vix_close, vix_pct, vix_meta = _fred_last2_valid(SERIES["vix"])
-    spx_close, spx_pct, spx_meta = _fred_last2_valid(SERIES["sp500"])
-    nas_close, nas_pct, nas_meta = _fred_last2_valid(SERIES["nasdaq"])
-    tnx_close, tnx_pct, tnx_meta = _fred_last2_valid(SERIES["tnx"])
-    dxy_close, dxy_pct, dxy_meta = _fred_last2_valid(SERIES["dxy"])
-    uso_close, uso_pct, uso_meta = _fred_last2_valid(SERIES["uso"])
+    vix_close, vix_pct = _last2_from_fred(SERIES["vix"], lookback_days=FRED_LOOKBACK_DAYS)
+    spx_close, spx_pct = _last2_from_fred(SERIES["sp500"], lookback_days=FRED_LOOKBACK_DAYS)
+    nas_close, nas_pct = _last2_from_fred(SERIES["nasdaq"], lookback_days=FRED_LOOKBACK_DAYS)
+    tnx_close, tnx_pct = _last2_from_fred(SERIES["tnx"], lookback_days=FRED_LOOKBACK_DAYS)
+    dxy_close, dxy_pct = _last2_from_fred(SERIES["dxy"], lookback_days=FRED_LOOKBACK_DAYS)
+    uso_close, uso_pct = _last2_from_fred(SERIES["uso"], lookback_days=FRED_LOOKBACK_DAYS)
 
-    # Gold via Alpaca GLD (only)
-    gld_close, gld_pct, gld_meta = _alpaca_last2_daily_close("GLD")
+    # Gold via Alpaca GLD daily bars (ETF proxy)
+    gld_close, gld_pct = _alpaca_last2_close("GLD", lookback_days=FRED_LOOKBACK_DAYS)
 
+    # Percent->decimal transforms
     spx_pct_dec = float(safe_float(spx_pct) / 100.0)
     dxy_pct_dec = float(safe_float(dxy_pct) / 100.0)
 
     breadth_proxy = float(spx_pct_dec)
-
     volatility = float(max(0.0, min(0.10, float(safe_float(vix_close)) / 100.0)))
     risk_off = _risk_off_score(float(safe_float(vix_close)), float(spx_pct_dec), float(dxy_pct_dec))
 
@@ -505,19 +494,16 @@ def build_macro_features() -> Dict[str, Any]:
         "vix_close": float(safe_float(vix_close)),
         "vix_daily_pct": float(safe_float(vix_pct)),
 
-        # Canonical SP500 fields (clarity)
+        # Canonical: SP500 (index level)
         "sp500_close": float(safe_float(spx_close)),
-        "sp500_daily_pct": float(safe_float(spx_pct)),           # percent
-        "sp500_pct_decimal": float(safe_float(spx_pct_dec)),     # decimal
+        "sp500_daily_pct": float(safe_float(spx_pct)),          # percent
+        "sp500_pct_decimal": float(safe_float(spx_pct_dec)),    # decimal
 
-        # Legacy aliases (back-compat): treat as SP500 proxy
-        "spy_close": float(safe_float(spx_close)),
-        "spy_daily_pct": float(safe_float(spx_pct)),
-        "spy_pct_decimal": float(safe_float(spx_pct_dec)),
-        "spy_is_proxy": True,
-        "spy_proxy_source": "FRED:SP500",
+        # NASDAQ (index level) as a tech-risk proxy
+        "nasdaq_close": float(safe_float(nas_close)),
+        "nasdaq_daily_pct": float(safe_float(nas_pct)),
 
-        # NASDAQ surrogate for QQQ-ish tech risk (optional)
+        # Keep legacy qqq_* fields too (many parts of your system expect qqq_* names)
         "qqq_close": float(safe_float(nas_close)),
         "qqq_daily_pct": float(safe_float(nas_pct)),
 
@@ -525,21 +511,20 @@ def build_macro_features() -> Dict[str, Any]:
         "tnx_close": float(safe_float(tnx_close)),
         "tnx_daily_pct": float(safe_float(tnx_pct)),
 
-        # DXY-ish index
+        # Dollar index
         "dxy_close": float(safe_float(dxy_close)),
         "dxy_daily_pct": float(safe_float(dxy_pct)),
         "dxy_pct_decimal": float(safe_float(dxy_pct_dec)),
 
-        # Gold & Oil (gold via Alpaca GLD)
-        "gld_close": float(safe_float(gld_close)),
-        "gld_daily_pct": float(safe_float(gld_pct)),
-        "gld_source": "alpaca_gld",
-        "gld_symbol": "GLD",
-
+        # Oil
         "uso_close": float(safe_float(uso_close)),
         "uso_daily_pct": float(safe_float(uso_pct)),
 
-        # Breadth proxy
+        # Gold via GLD (Alpaca)
+        "gld_close": float(safe_float(gld_close)),
+        "gld_daily_pct": float(safe_float(gld_pct)),
+
+        # Breadth proxy (consistent with your previous approach)
         "breadth_proxy": float(safe_float(breadth_proxy)),
 
         # Downstream keys
@@ -551,29 +536,29 @@ def build_macro_features() -> Dict[str, Any]:
         "updated_at": now_iso_utc,
 
         # provenance
-        "source": "fred_plus_alpaca_gold",
+        "source": "fred+alpaca_gld",
         "fred_series": dict(SERIES),
-        "fetch_meta": {
-            "fred": {
-                "vix": vix_meta,
-                "sp500": spx_meta,
-                "nasdaq": nas_meta,
-                "tnx": tnx_meta,
-                "dxy": dxy_meta,
-                "uso": uso_meta,
-            },
-            "alpaca_gold": gld_meta,
-        },
+        "alpaca_gold_symbol": "GLD",
+        "alpaca_data_feed": ALPACA_DATA_FEED or "omitted",
     }
 
-    # Aliases used by regime_detector / context_state expectations
+    # ------------------------------------------------------------
+    # Legacy aliases (to avoid breaking downstream code)
+    # ------------------------------------------------------------
+    # Your regime code historically reads spy_close/spy_pct_decimal/breadth_proxy.
+    # We keep them, but they are explicitly SP500-derived.
+    macro_state["spy_close"] = float(macro_state["sp500_close"])
+    macro_state["spy_daily_pct"] = float(macro_state["sp500_daily_pct"])
+    macro_state["spy_pct_decimal"] = float(macro_state["sp500_pct_decimal"])
+
+    # Keys regime_detector/context_state often look for
     macro_state["vix"] = float(macro_state.get("vix_close", 0.0))
-    macro_state["spy_pct"] = float(macro_state.get("sp500_pct_decimal", 0.0))  # regime uses this anyway
+    macro_state["spy_pct"] = float(macro_state.get("spy_pct_decimal", 0.0))
     macro_state["breadth"] = float(macro_state.get("breadth_proxy", 0.0))
 
-    # ----------------------------
-    # Critical: Do NOT overwrite on failure
-    # ----------------------------
+    # ------------------------------------------------------------
+    # Do NOT overwrite on failure
+    # ------------------------------------------------------------
     if not _macro_looks_sane(macro_state):
         log("[macro_fetcher] ⚠️ Macro fetch looks invalid. Keeping last snapshot (no overwrite).")
         if out_path:
@@ -582,7 +567,7 @@ def build_macro_features() -> Dict[str, Any]:
                 return {"status": "skipped", "reason": "macro_not_sane_keep_last", "macro_state": cached}
         return {"status": "skipped", "reason": "macro_not_sane_no_cache", "macro_state": macro_state}
 
-    # Save canonical macro_state.json
+    # Write canonical macro_state.json
     if out_path:
         try:
             _atomic_write_json(out_path, macro_state)
@@ -590,7 +575,7 @@ def build_macro_features() -> Dict[str, Any]:
         except Exception as e:
             log(f"[macro_fetcher] ⚠️ Failed to write macro_state.json: {e}")
 
-    # Also write market_state-compatible snapshot for regime_detector fallbacks
+    # Also write market_state.json snapshot (fallback for regime/context)
     try:
         ml_root = PATHS.get("ml_data", Path("ml_data"))
         market_state_path = Path(ml_root) / "market_state.json"
