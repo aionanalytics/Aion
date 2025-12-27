@@ -91,6 +91,7 @@ from backend.core.ai_model.feature_pipeline import *
 from backend.core.ai_model.predictor import *
 from backend.core.ai_model.feature_pipeline import _load_feature_list
 
+
 def _aion_meta_snapshot() -> Dict[str, Any]:
     try:
         ab = _read_aion_brain() or {}
@@ -131,6 +132,64 @@ def _resolve_dataset_path(dataset_name: str) -> Path:
         return Path(PATHS["ML_DATASET_INTRADAY"])
 
     raise ValueError(f"Unknown dataset_name: {dataset_name}")
+
+
+# ==========================================================
+# FIX: missing underscore helpers (import * does NOT import _names)
+# ==========================================================
+def _preflight_dataset_or_die(df_path: Path) -> None:
+    """
+    Fail fast if the dataset is missing/unreadable.
+
+    The nightly job was failing because this symbol wasn't defined at runtime:
+    underscore-prefixed names are NOT imported via `from module import *`
+    unless explicitly re-exported in __all__.
+    """
+    try:
+        df_path = Path(df_path)
+        if not df_path.exists():
+            raise FileNotFoundError(f"dataset missing: {df_path}")
+
+        # Guard against "created but empty" artifacts
+        try:
+            sz = int(df_path.stat().st_size)
+            if sz < 1024:
+                raise RuntimeError(f"dataset too small / likely invalid: {df_path} ({sz} bytes)")
+        except Exception:
+            pass
+
+        # Prefer fast metadata read (no full scan)
+        try:
+            import pyarrow.parquet as pq  # type: ignore
+            pf = pq.ParquetFile(str(df_path))
+            n = getattr(pf.metadata, "num_rows", None)
+            if n is not None and int(n) <= 0:
+                raise RuntimeError(f"dataset has zero rows: {df_path}")
+        except Exception:
+            # Fallback: minimal read just to prove it's readable
+            try:
+                _ = pd.read_parquet(df_path, engine="pyarrow").head(1)
+            except Exception as e:
+                raise RuntimeError(f"dataset unreadable: {df_path} ({e})")
+
+    except Exception as e:
+        log(f"[ai_model] ❌ dataset preflight failed: {e}")
+        raise
+
+
+def _model_path(horizon: str, model_root: Path | None = None) -> Path:
+    """
+    Path for joblib model (.pkl) artifacts.
+
+    This symbol was missing at runtime for the same reason as above.
+    """
+    mr = Path(model_root) if model_root is not None else MODEL_ROOT
+    try:
+        mr.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return mr / f"regressor_{str(horizon).strip()}.pkl"
+
 
 def train_model(
     dataset_name: str = "training_data_daily.parquet",
@@ -319,10 +378,10 @@ def train_model(
                         if not isinstance(rs, dict):
                             rs = dict(tstats) if isinstance(tstats, dict) else {}
                             return_stats[horizon] = rs
-                        rs['valid_global'] = False
-                        rs['invalid_reason'] = str(vdiag.get('reject_reason') or 'rejected')
+                        rs["valid_global"] = False
+                        rs["invalid_reason"] = str(vdiag.get("reject_reason") or "rejected")
                         if isinstance(vdiag, dict):
-                            rs['validation'] = dict(vdiag)
+                            rs["validation"] = dict(vdiag)
                     except Exception:
                         pass
                     continue
@@ -349,10 +408,10 @@ def train_model(
                     if not isinstance(rs, dict):
                         rs = dict(tstats) if isinstance(tstats, dict) else {}
                         return_stats[horizon] = rs
-                    rs['valid_global'] = True
-                    rs['invalid_reason'] = None
+                    rs["valid_global"] = True
+                    rs["invalid_reason"] = None
                     if isinstance(vdiag, dict):
-                        rs['validation'] = dict(vdiag)
+                        rs["validation"] = dict(vdiag)
                 except Exception:
                     pass
             except Exception as e:
@@ -379,8 +438,12 @@ def train_model(
                 if not mask.any():
                     continue
 
-                X_df = df_batch.loc[mask, feature_cols].apply(pd.to_numeric, errors="coerce") \
-                    .replace([np.inf, -np.inf], np.nan).fillna(0.0)
+                X_df = (
+                    df_batch.loc[mask, feature_cols]
+                    .apply(pd.to_numeric, errors="coerce")
+                    .replace([np.inf, -np.inf], np.nan)
+                    .fillna(0.0)
+                )
 
                 y = y_raw.loc[mask].clip(lower=y_clip_low, upper=y_clip_high).to_numpy(dtype=np.float32, copy=False)
                 X = X_df.to_numpy(dtype=np.float32, copy=False)
@@ -466,7 +529,6 @@ def train_all_models(
         symbol_whitelist=symbol_whitelist,
         model_root=model_root,
     )
-
 
 
 # ==========================================================
@@ -656,6 +718,7 @@ def _load_latest_features_df(
     out = pd.DataFrame(mat, index=symbols, columns=required_feature_cols)
     return out
 
+
 # ==========================================================
 # Prediction diagnostics writer
 # ==========================================================
@@ -666,6 +729,7 @@ def _hist_counts(values: np.ndarray, bins: np.ndarray) -> List[int]:
         return [int(x) for x in counts]
     except Exception:
         return []
+
 
 def _write_pred_diagnostics(diag: Dict[str, Any]) -> None:
     try:
@@ -733,15 +797,14 @@ def predict_all(
     sector_momo = 0.5 * sec1 + 0.5 * sec4
 
     # derive sector label per symbol (from stable one-hot schema produced by ml_data_builder)
-    sector_cols = [c for c in X_df.columns if isinstance(c, str) and c.startswith('sector_')]
+    sector_cols = [c for c in X_df.columns if isinstance(c, str) and c.startswith("sector_")]
     if sector_cols:
         sec_mat = X_df[sector_cols].to_numpy(dtype=float, copy=False)
         sec_idx = np.argmax(sec_mat, axis=1)
-        sector_labels = np.array([sector_cols[int(i)][len('sector_'):] for i in sec_idx], dtype=object)
-        sector_labels = np.array([str(s).upper().strip() if s else 'UNKNOWN' for s in sector_labels], dtype=object)
+        sector_labels = np.array([sector_cols[int(i)][len("sector_"):] for i in sec_idx], dtype=object)
+        sector_labels = np.array([str(s).upper().strip() if s else "UNKNOWN" for s in sector_labels], dtype=object)
     else:
-        sector_labels = np.array(['UNKNOWN'] * len(X_df), dtype=object)
-
+        sector_labels = np.array(["UNKNOWN"] * len(X_df), dtype=object)
 
     regressors = _load_regressors()
     stats_map = _load_return_stats()
@@ -877,7 +940,7 @@ def predict_all(
     # If a horizon is globally weak, we can still allow sectors that show
     # non-degenerate dispersion in predictions (enough names + spread).
     # ----------------------------------------------------------
-    MIN_SECTOR_NAMES = int(os.getenv('AION_MIN_SECTOR_NAMES', '30'))
+    MIN_SECTOR_NAMES = int(os.getenv("AION_MIN_SECTOR_NAMES", "30"))
     sector_validity: Dict[str, Dict[str, Any]] = {}
     try:
         for h, clipped in horizon_clipped_preds.items():
@@ -889,7 +952,7 @@ def predict_all(
                     continue
                 std = float(np.std(clipped[mask]))
                 valid = bool((n >= MIN_SECTOR_NAMES) and (std >= 0.5 * float(MIN_PRED_STD)))
-                sec_map[str(sec)] = {'valid': valid, 'n': n, 'pred_std': std}
+                sec_map[str(sec)] = {"valid": valid, "n": n, "pred_std": std}
             sector_validity[h] = sec_map
     except Exception:
         sector_validity = {}
@@ -911,9 +974,9 @@ def predict_all(
         """Allow a ticker to speak even when the horizon/sector is weak,
         if we have evidence this ticker+horizon has been predictable historically."""
         try:
-            b = node.get('brain') or node.get('horizon_perf') or {}
-            if isinstance(b, dict) and 'horizon_perf' in b and isinstance(b.get('horizon_perf'), dict):
-                perf = b.get('horizon_perf') or {}
+            b = node.get("brain") or node.get("horizon_perf") or {}
+            if isinstance(b, dict) and "horizon_perf" in b and isinstance(b.get("horizon_perf"), dict):
+                perf = b.get("horizon_perf") or {}
             elif isinstance(b, dict):
                 perf = b
             else:
@@ -921,9 +984,9 @@ def predict_all(
             hnode = perf.get(horizon) or perf.get(horizon.lower()) or {}
             if not isinstance(hnode, dict):
                 return False
-            n = float(hnode.get('n', hnode.get('samples', 0)) or 0)
-            hit = float(hnode.get('hit_ratio', hnode.get('hit_rate', 0)) or 0)
-            mae = float(hnode.get('mae', 1e9) or 1e9)
+            n = float(hnode.get("n", hnode.get("samples", 0)) or 0)
+            hit = float(hnode.get("hit_ratio", hnode.get("hit_rate", 0)) or 0)
+            mae = float(hnode.get("mae", 1e9) or 1e9)
             # conservative defaults: require decent history + edge
             return bool((n >= 60) and (hit >= 0.55) and (mae < 0.08))
         except Exception:
@@ -943,13 +1006,13 @@ def predict_all(
             if h not in horizon_raw_preds:
                 continue
 
-            LONG_HORIZONS = {'13w', '26w', '52w'}
+            LONG_HORIZONS = {"13w", "26w", "52w"}
             if h in LONG_HORIZONS and bool(risk_off):
                 sym_res[h] = {
-                    'valid': False,
-                    'status': 'regime_blocked',
-                    'reason': 'risk_off_long_horizon',
-                    'coverage': {'level': 'regime'}
+                    "valid": False,
+                    "status": "regime_blocked",
+                    "reason": "risk_off_long_horizon",
+                    "coverage": {"level": "regime"},
                 }
                 continue
 
@@ -970,26 +1033,26 @@ def predict_all(
                 continue
 
             pred_ret = float(np.clip(raw_pred, -lim, lim))
-            sec_label = str(sector_labels[idx]) if idx < len(sector_labels) else 'UNKNOWN'
-            global_ok = bool(stats.get('valid_global', True))
+            sec_label = str(sector_labels[idx]) if idx < len(sector_labels) else "UNKNOWN"
+            global_ok = bool(stats.get("valid_global", True))
             # also require universe-wide prediction spread to avoid flat rankings
             try:
-                hdiag = diagnostics.get('horizons', {}).get(h, {})
-                if isinstance(hdiag, dict) and float(hdiag.get('clipped_std', 0.0) or 0.0) < float(MIN_PRED_STD):
+                hdiag = diagnostics.get("horizons", {}).get(h, {})
+                if isinstance(hdiag, dict) and float(hdiag.get("clipped_std", 0.0) or 0.0) < float(MIN_PRED_STD):
                     global_ok = False
             except Exception:
                 pass
-            sector_ok = bool(sector_validity.get(h, {}).get(sec_label, {}).get('valid', False))
+            sector_ok = bool(sector_validity.get(h, {}).get(sec_label, {}).get("valid", False))
             ticker_ok = _ticker_perf_ok(node, h)
             if not (global_ok or sector_ok or ticker_ok):
                 sym_res[h] = {
-                    'valid': False,
-                    'status': 'insufficient_variance',
-                    'reason': str(stats.get('invalid_reason') or 'no_usable_signal'),
-                    'coverage': {'level': 'none', 'sector': sec_label},
+                    "valid": False,
+                    "status": "insufficient_variance",
+                    "reason": str(stats.get("invalid_reason") or "no_usable_signal"),
+                    "coverage": {"level": "none", "sector": sec_label},
                 }
                 continue
-            coverage_level = 'global' if global_ok else ('sector' if sector_ok else 'ticker')
+            coverage_level = "global" if global_ok else ("sector" if sector_ok else "ticker")
             try:
                 if coverage_level == "sector":
                     b = store._load_sector_bundle(sec_label)
@@ -1021,8 +1084,8 @@ def predict_all(
             sec_tilt = 1.0
             try:
                 sec_perf = (sector_accuracy.get(sec_label, {}) or {}).get(h, {})
-                if isinstance(sec_perf, dict) and int(sec_perf.get('n', 0) or 0) >= 50:
-                    hit = float(sec_perf.get('hit_rate', 0.5) or 0.5)
+                if isinstance(sec_perf, dict) and int(sec_perf.get("n", 0) or 0) >= 50:
+                    hit = float(sec_perf.get("hit_rate", 0.5) or 0.5)
                     sec_tilt = 0.9 + 0.4 * (hit - 0.5)
                     conf = float(np.clip(conf * sec_tilt, MIN_CONF, MAX_CONF))
             except Exception:
