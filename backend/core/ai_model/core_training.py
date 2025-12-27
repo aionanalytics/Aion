@@ -84,7 +84,41 @@ except Exception:
 # ==========================================================
 
 # === Refactor imports (mechanical) ===
-from backend.core.ai_model.target_builder import *
+from backend.core.ai_model.target_builder import (
+    # public constants used throughout this module
+    HORIZONS,
+    MODEL_ROOT,
+    TMP_MEMMAP_ROOT,
+    ML_DATA_ROOT,
+    LATEST_FEATURES_FILE,
+    LATEST_FEATURES_CSV,
+    PRED_DIAG_FILE,
+    MIN_USABLE_ROWS,
+    MIN_TARGET_STD,
+    MAX_TARGET_ZERO_FRAC,
+    MAX_STATS_SAMPLES,
+    MAX_VAL_SAMPLES,
+    HARD_MAX_ABS_RET,
+    MIN_PRED_STD,
+    MIN_CONF,
+    MAX_CONF,
+    DIAG_BINS,
+
+    # internal helpers (leading underscore) referenced by core_training
+    _preflight_dataset_or_die,
+    _stream_target_stats,
+    _clip_limit_for_horizon,
+    _iter_parquet_batches,
+    _stream_validation_sample,
+    _feature_map_path,
+    _load_horizon_feature_map,
+    _model_path,
+    _booster_path,
+    _save_return_stats,
+    _load_return_stats,
+    _last_close_asof,
+    _try_import_pyarrow,
+)
 from backend.core.ai_model.trainer import _make_regressor, _tune_lightgbm_regressor
 from backend.core.ai_model.sanity_gates import _post_train_sanity
 from backend.core.ai_model.feature_pipeline import *
