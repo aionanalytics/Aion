@@ -66,7 +66,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 # Default: don’t refetch macro more than once every 6 hours
-MACRO_MIN_REFRESH_HOURS = _env_float("AION_MACRO_MIN_REFRESH_HOURS", 6.0)
+MACRO_MIN_REFRESH_HOURS = _env_float("AION_MACRO_MIN_REFRESH_HOURS", 0.0)
 MACRO_MAX_RETRIES = _env_int("AION_MACRO_MAX_RETRIES", 3)
 MACRO_RETRY_BASE_SEC = _env_float("AION_MACRO_RETRY_BASE_SEC", 15.0)
 MACRO_FORCE = _env_bool("AION_MACRO_FORCE", False)
