@@ -191,17 +191,18 @@ if __name__ == "__main__":
     )
     threading.Thread(target=pipe_output, args=(dt_proc, "dt_backend"), daemon=True).start()
 
-    dt_live_proc = launch(
+    # ✅ NEW: Run the consolidated DT scheduler loop (bars + policy + execution + EOD cleanup)
+    dt_sched_proc = launch(
         [
             sys.executable,
             "-m",
-            "dt_backend.jobs.live_market_data_loop",
+            "dt_backend.jobs.dt_scheduler",
         ],
-        "dt_backend_live_loop",
+        "dt_scheduler",
     )
     threading.Thread(
         target=pipe_output,
-        args=(dt_live_proc, "dt_backend_live_loop"),
+        args=(dt_sched_proc, "dt_scheduler"),
         daemon=True,
     ).start()
 
@@ -228,8 +229,8 @@ if __name__ == "__main__":
             if dt_proc.poll() is not None:
                 raise RuntimeError("dt_backend API process exited")
 
-            if dt_live_proc.poll() is not None:
-                raise RuntimeError("dt_backend live loop exited")
+            if dt_sched_proc.poll() is not None:
+                raise RuntimeError("dt_scheduler exited")
 
             if replay_proc.poll() is not None:
                 raise RuntimeError("replay service exited")
@@ -240,7 +241,7 @@ if __name__ == "__main__":
 
     finally:
         shutdown_process(replay_proc, "replay_service")
-        shutdown_process(dt_live_proc, "dt_backend_live_loop")
+        shutdown_process(dt_sched_proc, "dt_scheduler")
         shutdown_process(dt_proc, "dt_backend")
         shutdown_process(backend_proc, "backend")
         time.sleep(2)

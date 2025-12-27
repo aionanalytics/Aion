@@ -142,6 +142,9 @@ DT_PATHS: Dict[str, Path] = {
     "rolling_dt_lock_file": DA_BRAINS / "intraday" / ".rolling_intraday_dt.lock",
     "rolling_longterm_dir": DT_BACKEND / "rolling" / "longterm",
 
+    # DT brain (durable learning / performance memory)
+    "dt_brain_file": DA_BRAINS / "core" / "dt_brain.json.gz",
+
     "signals_intraday_dir": ML_DATA_DT / "signals" / "intraday",
     "signals_intraday_predictions_dir": DATA_DT / "signals" / "intraday" / "predictions",
     "signals_intraday_ranks_dir": ML_DATA_DT / "signals" / "intraday" / "ranks",

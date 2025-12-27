@@ -84,14 +84,16 @@ def run_live_market_data_loop(
 ) -> Dict[str, Any]:
     """Continuously refresh live bars while the market is open."""
 
-    # IMPORTANT: live market loop writes to the market-only rolling file.
-    # This avoids Windows file-lock contention/gzip corruption when the
-    # dt job runs concurrently and writes dt state to its own rolling.
+    # Single-rolling architecture (Linux server):
+    # Live bars update the *same* rolling file the DT engine reads.
+    # Bars are a bounded sliding window and are expected to overwrite.
+    #
+    # NOTE: If you ever need to split files again (e.g., Windows contention),
+    # re-introduce a dedicated market rolling + explicit merge step.
     try:
-        market_path = DT_PATHS.get("rolling_market_intraday_file")
-        if market_path:
-            os.environ["DT_ROLLING_PATH"] = str(market_path)
-        os.environ["DT_USE_LOCK"] = "0"
+        os.environ.pop("DT_ROLLING_PATH", None)
+        # Locking is optional; on Linux the atomic rename write is enough.
+        os.environ.setdefault("DT_USE_LOCK", "0")
     except Exception:
         pass
 
@@ -127,6 +129,8 @@ def run_live_market_data_loop(
 
         _cycle()
         time.sleep(max(1, int(interval_sec)))
+
+
 if __name__ == "__main__":
     run_live_market_data_loop()
 
