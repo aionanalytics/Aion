@@ -177,8 +177,9 @@ ML_DATASETS = ML_ROOT / "datasets"
 ML_TRAINING = ML_ROOT / "training"
 ML_DATASET_DAILY = "ml_data/nightly/dataset/training_data_daily.parquet"
 
-# NEW: LightGBM dataset binary cache lives under ML_MODELS
 ML_LGBM_CACHE = ML_MODELS / "lgbm_cache"
+MACRO_DIR = ML_ROOT / "macro"
+MACRO_DIR.mkdir(parents=True, exist_ok=True)
 
 MACRO_STATE = ML_ROOT / "macro_state.json"
 MARKET_STATE = ML_ROOT / "market_state.json"
@@ -289,6 +290,7 @@ PATHS: Dict[str, Path] = {
 
     "ml_lgbm_cache": ML_LGBM_CACHE,
 
+    "macro": MACRO_DIR,
     "macro_state": MACRO_STATE,
     "market_state": MARKET_STATE,
     "regime_state": REGIME_STATE,
