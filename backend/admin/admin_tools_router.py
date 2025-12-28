@@ -105,6 +105,26 @@ def clear_locks(_: None = Depends(admin_required)):
     }
 
 # --------------------------------------------------
+# Fetch Tickers
+# --------------------------------------------------
+
+@router.post("/refresh-universes")
+def refresh_universes_tool(user=Depends(require_admin)):
+    try:
+        from backend.utils.refresh_universes_from_alpaca import refresh_universes
+        res = refresh_universes(write_files=True)
+        return {
+            "status": "ok",
+            "total_assets": res.total_assets,
+            "base_symbols": len(res.base_symbols),
+            "swing_symbols": len(res.swing_symbols),
+            "dt_symbols": len(res.dt_symbols),
+            "wrote": res.wrote,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --------------------------------------------------
 # Git pull
 # --------------------------------------------------
 
