@@ -8,6 +8,16 @@ import platform
 import threading
 from typing import Optional
 
+
+
+import importlib.util
+
+def module_exists(mod: str) -> bool:
+    try:
+        return importlib.util.find_spec(mod) is not None
+    except Exception:
+        return False
+
 # dotenv is optional; if .env has bad lines we don't want to crash boot
 try:
     from dotenv import load_dotenv
@@ -190,19 +200,17 @@ if __name__ == "__main__":
         "dt_backend",
     )
     threading.Thread(target=pipe_output, args=(dt_proc, "dt_backend"), daemon=True).start()
-
-    # ✅ NEW: Run the consolidated DT scheduler loop (bars + policy + execution + EOD cleanup)
-    dt_sched_proc = launch(
-        [
-            sys.executable,
-            "-m",
-            "dt_backend.jobs.dt_scheduler",
-        ],
-        "dt_scheduler",
+    # DT worker: prefer dt_scheduler if present; otherwise fall back to the legacy live loop.
+    dt_worker_module = (
+        "dt_backend.jobs.dt_scheduler"
+        if module_exists("dt_backend.jobs.dt_scheduler")
+        else "dt_backend.jobs.live_market_data_loop"
     )
+    dt_worker_name = "dt_scheduler" if dt_worker_module.endswith("dt_scheduler") else "dt_backend_live_loop"
+    dt_worker_proc = launch([sys.executable, "-m", dt_worker_module], dt_worker_name)
     threading.Thread(
         target=pipe_output,
-        args=(dt_sched_proc, "dt_scheduler"),
+        args=(dt_worker_proc, dt_worker_name),
         daemon=True,
     ).start()
 
@@ -221,19 +229,33 @@ if __name__ == "__main__":
 
     try:
         while True:
-            time.sleep(1)
-
             if backend_proc.poll() is not None:
                 raise RuntimeError("backend process exited")
 
-            if dt_proc.poll() is not None:
-                raise RuntimeError("dt_backend API process exited")
+            if dt_backend_proc.poll() is not None:
+                raise RuntimeError("dt_backend (API) process exited")
 
-            if dt_sched_proc.poll() is not None:
-                raise RuntimeError("dt_scheduler exited")
+            # DT worker is optional: if it dies, restart it instead of killing the whole stack.
+            if dt_worker_proc.poll() is not None:
+                rc = dt_worker_proc.returncode
+                msg = f"[supervisor] ⚠️ {dt_worker_name} exited (code={rc}) — restarting…"
+                print(msg, flush=True)
+                append_log(msg)
+                time.sleep(3)
+                dt_worker_proc = launch([sys.executable, "-m", dt_worker_module], dt_worker_name)
+                threading.Thread(
+                    target=pipe_output, args=(dt_worker_proc, dt_worker_name), daemon=True
+                ).start()
 
-            if replay_proc.poll() is not None:
-                raise RuntimeError("replay service exited")
+            # replay_service is dormant/optional
+            if replay_proc is not None and replay_proc.poll() is not None:
+                rc = replay_proc.returncode
+                msg = f"[supervisor] ⚠️ replay_service exited (code={rc}) — continuing without it"
+                print(msg, flush=True)
+                append_log(msg)
+                replay_proc = None
+
+            time.sleep(0.5)
 
     except KeyboardInterrupt:
         print("\n🛑 Shutting down AION system...")
@@ -241,7 +263,7 @@ if __name__ == "__main__":
 
     finally:
         shutdown_process(replay_proc, "replay_service")
-        shutdown_process(dt_sched_proc, "dt_scheduler")
+        shutdown_process(dt_worker_proc, dt_worker_name)
         shutdown_process(dt_proc, "dt_backend")
         shutdown_process(backend_proc, "backend")
         time.sleep(2)
