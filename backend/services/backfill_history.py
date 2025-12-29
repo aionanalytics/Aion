@@ -881,29 +881,21 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
                 removed = 0
                 removed += _prune_universe_file(UNIVERSE_FILE, bad)
 
-            # Optional: if you later add swing/dt split universe files,
-            # keep swing in sync automatically if it exists.
-            swing_file = PATHS["universe"] / "swing_universe.json"
-            if swing_file.exists():
-                removed += _prune_universe_file(swing_file, bad)
+                # Optional: if you later add swing/dt split universe files,
+                # keep swing in sync automatically if it exists.
+                swing_file = PATHS["universe"] / "swing_universe.json"
+                if swing_file.exists():
+                    removed += _prune_universe_file(swing_file, bad)
 
-            pruned_total = int(removed)
+                pruned_total = int(removed)
 
-            log(
-                f"🧹 Universe auto-prune: removed {removed} symbols "
-                f"(YFinance bootstrap returned 0 bars)."
-            )
-    except Exception as e:
-        log(f"⚠️ Universe prune step failed: {e}")
+                log(
+                    f"🧹 Universe auto-prune: removed {removed} symbols "
+                    f"(YFinance bootstrap returned 0 bars)."
+                )
 
-    dur = time.time() - start
-    log(f"✅ Backfill ({mode}) complete — {updated}/{total} updated in {dur:.1f}s.")
-
-    # NEW: end-of-run prune log (always prints, even if 0)
-    log(f"🧹 Pruned from universe this run: {int(pruned_total)}")
-
-    return updated
-
+        except Exception as e:
+            log(f"⚠️ Universe prune step failed: {e}")
 
 # -------------------------------------------------------------------
 # CLI
