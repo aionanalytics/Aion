@@ -232,7 +232,7 @@ if __name__ == "__main__":
             if backend_proc.poll() is not None:
                 raise RuntimeError("backend process exited")
 
-            if dt_backend_proc.poll() is not None:
+            if dt_proc.poll() is not None:
                 raise RuntimeError("dt_backend (API) process exited")
 
             # DT worker is optional: if it dies, restart it instead of killing the whole stack.
