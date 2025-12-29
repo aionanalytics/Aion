@@ -1,7 +1,7 @@
 # backend/services/backfill_history.py
 """
-backfill_history.py — v3.3
-(Rolling-Native, Normalized Batch StockAnalysis Bundle, YF History Bootstrap)
+backfill_history.py — v3.4
+(Rolling-Native, Normalized Batch StockAnalysis Bundle, HF History Bootstrap + YF Fallback)
 
 Purpose:
 - Refreshes and repairs ticker data directly inside Rolling cache.
@@ -12,39 +12,35 @@ Purpose:
 - Normalizes all fetched field names before saving (camelCase → snake_case, rsi → rsi_14).
 - Writes directly into rolling.json.gz using the new backend.core.data_pipeline helpers.
 
-NEW in v3.2:
-- Automatic 3-year (750 trading days) YFinance bootstrap when history is too short (< min_days).
-- History is strictly append-only with per-date dedupe (never wipes existing history).
-- Uses utils.progress_bar.progress_bar for nicer progress output.
-- FutureWarnings from yfinance/pandas removed (no float(single-element Series), auto_adjust set explicitly).
+History bootstrap (when history is too short):
+- Preferred: Hugging Face "yahoo-finance-data" via defeatbeta-api (DuckDB + cache_httpfs).
+  This avoids Yahoo rate limits for multi-year daily history.
+- Fallback: yfinance with a hard global rate limiter (default ~20 calls/min) + retry backoff.
 
-NEW in v3.3:
-- Removed dependency on deprecated ensure_symbol_fields from data_pipeline.
-- Local helper _ensure_symbol_node keeps basic symbol/history structure;
-  full normalization (predictions/context/news/social/policy) is delegated
-  to backend.core.data_pipeline.save_rolling().
-- Skips meta keys starting with '_' when deriving symbol list from Rolling.
+Notes:
+- History is append-only with per-date dedupe (never wipes existing history).
+- StockAnalysis is still used to write a "today" bar and fresh snapshot fields.
+- Recent-day patching via yfinance is available but OFF by default (see env vars below).
 """
 
 from __future__ import annotations
 
-import json
 import gzip
+import json
+import math
+import os
+import threading
 import time
-from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Iterable
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 import yfinance as yf
 
 from backend.core.config import PATHS
-from backend.core.data_pipeline import (
-    _read_rolling,
-    save_rolling,
-    log,
-)
+from backend.core.data_pipeline import _read_rolling, log, save_rolling
 from backend.services.metrics_fetcher import build_latest_metrics
 from utils.progress_bar import progress_bar
 
@@ -54,9 +50,58 @@ UNIVERSE_FILE = PATHS["universe"] / "master_universe.json"
 # Verbosity controls (tune as you like)
 # -------------------------------------------------------------------
 VERBOSE_BOOTSTRAP = False          # per-ticker “Bootstrapped history for XYZ…”
-VERBOSE_BOOTSTRAP_ERRORS = False   # per-ticker YF failure messages
+VERBOSE_BOOTSTRAP_ERRORS = False   # per-ticker bootstrap failure messages
 
+# -------------------------------------------------------------------
+# HF / yfinance bootstrap controls (env overridable)
+# -------------------------------------------------------------------
+# Prefer HF dataset bootstrap (defeatbeta-api) when available.
+USE_HF_BOOTSTRAP = os.getenv("AION_USE_HF_BOOTSTRAP", "1").strip() not in {"0", "false", "False"}
 
+# yfinance global rate limiter:
+#  - default: ~1 call / 3.2s ≈ 18.75 calls/min
+YF_MIN_SECONDS_BETWEEN_CALLS = float(os.getenv("AION_YF_MIN_SECONDS_BETWEEN_CALLS", "3.2"))
+YF_MAX_RETRIES = int(os.getenv("AION_YF_MAX_RETRIES", "4"))
+YF_BACKOFF_BASE_SECONDS = float(os.getenv("AION_YF_BACKOFF_BASE_SECONDS", "6.0"))
+
+# Optional: patch the most recent N calendar days with yfinance when HF data is stale.
+# WARNING: doing this for thousands of symbols will take hours at 20 calls/min.
+YF_PATCH_RECENT_DAYS = int(os.getenv("AION_YF_PATCH_RECENT_DAYS", "0"))  # 0 = off
+YF_PATCH_MAX_SYMBOLS = int(os.getenv("AION_YF_PATCH_MAX_SYMBOLS", "0"))  # 0 = no patching
+
+# -------------------------------------------------------------------
+# StockAnalysis endpoints
+# -------------------------------------------------------------------
+SA_BASE = "https://stockanalysis.com/api/screener"
+
+SA_INDEX_FIELDS = [
+    "symbol", "name", "price", "change", "volume",
+    "marketCap", "peRatio", "industry",
+]
+
+SA_METRICS = [
+    "rsi", "ma50", "ma200",
+    "pbRatio", "psRatio", "pegRatio",
+    "beta",
+    "fcfYield", "earningsYield", "dividendYield",
+    "revenueGrowth", "epsGrowth",
+    "profitMargin", "operatingMargin", "grossMargin",
+    "debtEquity", "debtEbitda",
+    "sector", "float", "sharesOut",
+    "ch1w", "ch1m", "ch3m", "ch6m", "ch1y", "chYTD",
+    "open", "high", "low", "close",
+]
+
+# How many days of history to keep in rolling (≈ 3 trading years)
+MAX_HISTORY_DAYS = 750
+
+# Directory for audit bundle
+METRICS_BUNDLE_DIR = Path("data") / "metrics_cache" / "bundle"
+METRICS_BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
+
+# -------------------------------------------------------------------
+# Universe
+# -------------------------------------------------------------------
 def load_universe() -> list[str]:
     if not UNIVERSE_FILE.exists():
         log(f"⚠️ Universe file not found at {UNIVERSE_FILE}")
@@ -74,56 +119,15 @@ def load_universe() -> list[str]:
 
 
 # -------------------------------------------------------------------
-# StockAnalysis endpoints
+# HTTP helpers (StockAnalysis)
 # -------------------------------------------------------------------
-SA_BASE = "https://stockanalysis.com/api/screener"
-
-# Index "base" fields from /s/i
-SA_INDEX_FIELDS = [
-    "symbol", "name", "price", "change", "volume",
-    "marketCap", "peRatio", "industry",
-]
-
-# Metrics from /s/d/<metric> (aligned with SA docs)
-# NOTE:
-#   - rsi normalized → rsi_14
-#   - sharesOut used for shares outstanding
-#   - open/high/low/close fetched from /s/d/* for fuller bars
-SA_METRICS = [
-    "rsi", "ma50", "ma200",
-    "pbRatio", "psRatio", "pegRatio",
-    "beta",
-    "fcfYield", "earningsYield", "dividendYield",
-    "revenueGrowth", "epsGrowth",
-    "profitMargin", "operatingMargin", "grossMargin",
-    "debtEquity", "debtEbitda",
-    "sector", "float", "sharesOut",
-    "ch1w", "ch1m", "ch3m", "ch6m", "ch1y", "chYTD",
-    "open", "high", "low", "close",
-]
-
-# How many days of history to keep in rolling
-# (Option A — about 3 trading years)
-MAX_HISTORY_DAYS = 750
-
-# Directory for audit bundle
-METRICS_BUNDLE_DIR = Path("data") / "metrics_cache" / "bundle"
-METRICS_BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
-
-
-# -------------------------------------------------------------------
-# HTTP helpers
-# -------------------------------------------------------------------
-
 def _sa_post_json(path: str, payload: dict | None = None, timeout: int = 20) -> dict | None:
-    """Generic helper for StockAnalysis API POST/GET requests."""
     url = f"{SA_BASE}/{path.strip('/')}"
     try:
         if payload is not None:
             r = requests.post(url, json=payload, timeout=timeout)
             if r.status_code == 200:
                 return r.json()
-        # Fallback GET
         r = requests.get(url, timeout=timeout)
         if r.status_code == 200:
             return r.json()
@@ -132,16 +136,10 @@ def _sa_post_json(path: str, payload: dict | None = None, timeout: int = 20) -> 
     return None
 
 
-# Simple symbol-level fetch (used only in *rare* incremental mode)
 _INDEX_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 def _fetch_from_stockanalysis(sym: str) -> Dict[str, Any] | None:
-    """
-    Lightweight helper to fetch a single symbol snapshot.
-    For now, we reuse /s/i batch and cache once per run, then read from it.
-    This is only used in the incremental branch, which is rarely hit.
-    """
     global _INDEX_CACHE
     sym = sym.upper()
 
@@ -173,12 +171,7 @@ def _fetch_from_stockanalysis(sym: str) -> Dict[str, Any] | None:
     return _INDEX_CACHE.get(sym)
 
 
-# -------------------------------------------------------------------
-# Batch SA bundle builders
-# -------------------------------------------------------------------
-
 def _fetch_sa_index_batch() -> Dict[str, Dict[str, Any]]:
-    """Fetch base index snapshot from /s/i (up to 10k rows)."""
     payload = {
         "fields": SA_INDEX_FIELDS,
         "filter": {"exchange": "all"},
@@ -210,7 +203,6 @@ def _fetch_sa_index_batch() -> Dict[str, Dict[str, Any]]:
 
 
 def _fetch_sa_metric(metric: str, timeout: int = 20) -> Dict[str, Any]:
-    """Fetch a single metric table from /s/d/<metric>."""
     js = _sa_post_json(f"s/d/{metric}", timeout=timeout)
     out: Dict[str, Any] = {}
     try:
@@ -229,11 +221,10 @@ def _fetch_sa_metric(metric: str, timeout: int = 20) -> Dict[str, Any]:
 
 
 def _fetch_sa_metrics_bulk(metrics: Iterable[str], max_workers: int = 8) -> Dict[str, Dict[str, Any]]:
-    """Fetch multiple /s/d/<metric> endpoints in parallel."""
     result: Dict[str, Dict[str, Any]] = {}
     metrics = list(metrics)
 
-    def _job(m):
+    def _job(m: str):
         return m, _fetch_sa_metric(m)
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -247,9 +238,7 @@ def _fetch_sa_metrics_bulk(metrics: Iterable[str], max_workers: int = 8) -> Dict
 # -------------------------------------------------------------------
 # Normalization helper
 # -------------------------------------------------------------------
-
 def _normalize_node_keys(node: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert camelCase → snake_case and ensure RSI normalized to rsi_14."""
     if not isinstance(node, dict):
         return node
     replacements = {
@@ -279,12 +268,10 @@ def _normalize_node_keys(node: Dict[str, Any]) -> Dict[str, Any]:
 # -------------------------------------------------------------------
 # Merge + bundle save
 # -------------------------------------------------------------------
-
 def _merge_index_and_metrics(
     index_map: Dict[str, Dict[str, Any]],
     metrics_map: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Dict[str, Any]]:
-    """Merge /s/i index snapshot and /s/d metric tables into a per-symbol bundle."""
     out = dict(index_map)
     for metric, tbl in (metrics_map or {}).items():
         for sym, val in (tbl or {}).items():
@@ -295,7 +282,6 @@ def _merge_index_and_metrics(
 
 
 def _normalize_bundle(bundle: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize all field names in the bundle once at the end."""
     changed = 0
     for sym, node in bundle.items():
         before = set(node.keys())
@@ -312,7 +298,6 @@ def _normalize_bundle(bundle: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _save_sa_bundle_snapshot(bundle: Dict[str, Any]) -> str | None:
-    """Save full bundle snapshot for audit."""
     try:
         ts = datetime.utcnow().strftime("%Y-%m-%d")
         path = METRICS_BUNDLE_DIR / f"sa_bundle_{ts}.json.gz"
@@ -326,7 +311,6 @@ def _save_sa_bundle_snapshot(bundle: Dict[str, Any]) -> str | None:
 
 
 def fetch_sa_bundle_parallel(max_workers: int = 8) -> Dict[str, Dict[str, Any]]:
-    """Fetch index + all metrics, normalize, and return unified bundle."""
     base = _fetch_sa_index_batch()
     if not base:
         log("⚠️ /s/i returned no rows.")
@@ -340,53 +324,146 @@ def fetch_sa_bundle_parallel(max_workers: int = 8) -> Dict[str, Dict[str, Any]]:
 
 
 # -------------------------------------------------------------------
-# YF history bootstrap helpers
+# History bootstrap helpers (HF preferred, yfinance fallback)
 # -------------------------------------------------------------------
+_YF_RATE_LOCK = threading.Lock()
+_YF_LAST_CALL_TS = 0.0
 
-def _bootstrap_history_yf(symbol: str, max_days: int = MAX_HISTORY_DAYS) -> List[Dict[str, Any]]:
+
+def _is_rate_limit_error(e: Exception) -> bool:
+    name = e.__class__.__name__.lower()
+    msg = str(e).lower()
+    if "ratelimit" in name or "rate limit" in msg or "too many requests" in msg:
+        return True
+    return False
+
+
+def _yf_rate_limit_wait() -> None:
+    global _YF_LAST_CALL_TS
+    with _YF_RATE_LOCK:
+        now = time.time()
+        delta = now - _YF_LAST_CALL_TS
+        if delta < YF_MIN_SECONDS_BETWEEN_CALLS:
+            time.sleep(max(0.0, YF_MIN_SECONDS_BETWEEN_CALLS - delta))
+        _YF_LAST_CALL_TS = time.time()
+
+
+def _bootstrap_history_yf(symbol: str, max_days: int = MAX_HISTORY_DAYS, period: str = "3y") -> List[Dict[str, Any]]:
     """
-    Fetch up to ~3 years of daily bars from YFinance for a symbol.
+    Rate-limited yfinance download (fallback path).
     Returns list of {date, open, high, low, close, volume}.
     """
     symbol = symbol.upper()
-    try:
-        df = yf.download(
-            tickers=symbol,
-            interval="1d",
-            period="3y",         # ~3 calendar years
-            auto_adjust=False,   # explicit → no FutureWarning
-            progress=False,
-        )
-        if df is None or df.empty:
+    for attempt in range(max(1, YF_MAX_RETRIES)):
+        try:
+            _yf_rate_limit_wait()
+            df = yf.download(
+                tickers=symbol,
+                interval="1d",
+                period=period,
+                auto_adjust=False,
+                progress=False,
+                threads=False,  # critical: avoid bursty parallel HTTP
+            )
+            if df is None or df.empty:
+                return []
+
+            cols = ["Open", "High", "Low", "Close", "Volume"]
+            df = df[cols].dropna(how="all")
+
+            bars: List[Dict[str, Any]] = []
+            # itertuples gives plain scalars → avoids FutureWarnings
+            for idx, open_, high, low, close, volume in df.itertuples():
+                bars.append(
+                    {
+                        "date": idx.strftime("%Y-%m-%d"),
+                        "open": float(open_ or 0.0),
+                        "high": float(high or 0.0),
+                        "low": float(low or 0.0),
+                        "close": float(close or 0.0),
+                        "volume": float(volume or 0.0),
+                    }
+                )
+
+            return bars[-max_days:] if bars else []
+
+        except Exception as e:
+            if _is_rate_limit_error(e):
+                # Exponential-ish backoff, still respecting global limiter
+                sleep_s = min(120.0, YF_BACKOFF_BASE_SECONDS * (2 ** attempt))
+                if VERBOSE_BOOTSTRAP_ERRORS:
+                    log(f"⚠️ YF rate limited for {symbol} (attempt {attempt+1}/{YF_MAX_RETRIES}) — sleeping {sleep_s:.0f}s")
+                time.sleep(sleep_s)
+                continue
+
+            if VERBOSE_BOOTSTRAP_ERRORS:
+                log(f"⚠️ YF bootstrap failed for {symbol}: {e}")
             return []
 
-        # Drop rows with all-NaN OHLCV
-        cols = ["Open", "High", "Low", "Close", "Volume"]
-        df = df[cols].dropna(how="all")
+    # exhausted retries
+    return []
+
+
+def _bootstrap_history_hf(symbol: str, max_days: int = MAX_HISTORY_DAYS) -> List[Dict[str, Any]]:
+    """
+    Preferred bootstrap via Hugging Face dataset "yahoo-finance-data" using defeatbeta-api.
+    If defeatbeta-api isn't installed, returns [] and caller will fall back to yfinance.
+    """
+    symbol = symbol.upper()
+    try:
+        from defeatbeta_api.data.ticker import Ticker  # type: ignore
+    except Exception:
+        return []
+
+    try:
+        df = Ticker(symbol).price()  # columns: symbol, report_date, open, close, high, low, volume
+        if df is None or getattr(df, "empty", True):
+            return []
+        # Sort, tail, and convert
+        try:
+            df = df.sort_values("report_date")
+        except Exception:
+            pass
+        df = df.tail(max_days)
 
         bars: List[Dict[str, Any]] = []
-        # itertuples gives us plain Python scalars → no FutureWarning
-        for idx, open_, high, low, close, volume in df.itertuples():
+        # Use itertuples for speed; report_date may be datetime64 or date
+        for r in df.itertuples(index=False):
+            d_raw = getattr(r, "report_date", None)
+            if d_raw is None:
+                continue
+            # Robust date formatting
+            try:
+                if hasattr(d_raw, "strftime"):
+                    d = d_raw.strftime("%Y-%m-%d")
+                else:
+                    d = str(d_raw)[:10]
+            except Exception:
+                d = str(d_raw)[:10]
+
+            # Handle missing/NaN values safely
+            def f(x: Any) -> float:
+                try:
+                    v = float(x)
+                    return 0.0 if (not math.isfinite(v)) else v
+                except Exception:
+                    return 0.0
+
             bars.append(
                 {
-                    "date": idx.strftime("%Y-%m-%d"),
-                    "open": float(open_ or 0.0),
-                    "high": float(high or 0.0),
-                    "low": float(low or 0.0),
-                    "close": float(close or 0.0),
-                    "volume": float(volume or 0.0),
+                    "date": d,
+                    "open": f(getattr(r, "open", 0.0)),
+                    "high": f(getattr(r, "high", 0.0)),
+                    "low": f(getattr(r, "low", 0.0)),
+                    "close": f(getattr(r, "close", 0.0)),
+                    "volume": f(getattr(r, "volume", 0.0)),
                 }
             )
 
-        if not bars:
-            return []
-
-        # Keep only the most recent max_days bars
-        return bars[-max_days:]
-
+        return bars[-max_days:] if bars else []
     except Exception as e:
         if VERBOSE_BOOTSTRAP_ERRORS:
-            log(f"⚠️ YF bootstrap failed for {symbol}: {e}")
+            log(f"⚠️ HF bootstrap failed for {symbol}: {e}")
         return []
 
 
@@ -394,50 +471,66 @@ def _unique_history_dates(hist: List[Dict[str, Any]]) -> set[str]:
     return {str(b.get("date")) for b in (hist or []) if b.get("date")}
 
 
-def _ensure_bootstrap_history_if_needed(
-    symbol: str,
-    hist: List[Dict[str, Any]],
-    min_days: int,
-) -> List[Dict[str, Any]]:
+def _merge_histories_prefer_existing(base: List[Dict[str, Any]], existing: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    If history is too short (< min_days unique dates), bootstrap from YF.
+    Merge two histories by date.
+    - base: usually HF/YF bars (fallback data)
+    - existing: bars already in rolling (preferred if conflict)
+    """
+    by_date: Dict[str, Dict[str, Any]] = {}
+    for bar in base or []:
+        d = str(bar.get("date") or "")
+        if d:
+            by_date[d] = bar
+    for bar in existing or []:
+        d = str(bar.get("date") or "")
+        if d:
+            by_date[d] = bar  # overwrite with existing
+    merged = list(by_date.values())
+    merged.sort(key=lambda x: x.get("date") or "")
+    return merged[-MAX_HISTORY_DAYS:]
 
-    - Never overwrites existing per-date bars.
-    - YF bars are only used for dates missing in existing history.
-    - Result is sorted by date and capped at MAX_HISTORY_DAYS.
+
+def _patch_recent_days_yf(symbol: str, hist: List[Dict[str, Any]], days: int) -> List[Dict[str, Any]]:
+    """
+    Optional: patch the last N calendar days using yfinance (rate-limited).
+    This is only useful if your HF snapshot is stale.
+    """
+    if days <= 0:
+        return hist
+    # yfinance period accepts e.g. "7d"
+    period = f"{max(1, int(days))}d"
+    yf_bars = _bootstrap_history_yf(symbol, max_days=MAX_HISTORY_DAYS, period=period)
+    if not yf_bars:
+        return hist
+    return _merge_histories_prefer_existing(base=yf_bars, existing=hist)
+
+
+def _ensure_bootstrap_history_if_needed(symbol: str, hist: List[Dict[str, Any]], min_days: int) -> List[Dict[str, Any]]:
+    """
+    If history is too short (< min_days unique dates), bootstrap.
+
+    Order:
+      1) HF dataset (defeatbeta-api) if enabled and available
+      2) yfinance (rate-limited) fallback
+      3) Optional recent-day patching via yfinance (OFF by default)
     """
     symbol = symbol.upper()
     existing_dates = _unique_history_dates(hist)
-
     if len(existing_dates) >= min_days:
         return hist
 
-    # Need bootstrap
-    yf_bars = _bootstrap_history_yf(symbol, max_days=MAX_HISTORY_DAYS)
-    if not yf_bars:
+    bootstrap_bars: List[Dict[str, Any]] = []
+    if USE_HF_BOOTSTRAP:
+        bootstrap_bars = _bootstrap_history_hf(symbol, max_days=MAX_HISTORY_DAYS)
+
+    if not bootstrap_bars:
+        bootstrap_bars = _bootstrap_history_yf(symbol, max_days=MAX_HISTORY_DAYS, period="3y")
+
+    if not bootstrap_bars:
         return hist
 
-    by_date: Dict[str, Dict[str, Any]] = {}
-
-    # Start with YF bars
-    for bar in yf_bars:
-        d = str(bar.get("date"))
-        if not d:
-            continue
-        by_date[d] = bar
-
-    # Overlay existing history WITHOUT overwriting YF (YF is used as fallback)
-    for bar in hist or []:
-        d = str(bar.get("date"))
-        if not d:
-            continue
-        # Prefer existing bar if present
-        if d not in by_date:
-            by_date[d] = bar
-
-    merged = list(by_date.values())
-    merged.sort(key=lambda x: x.get("date") or "")
-    merged = merged[-MAX_HISTORY_DAYS:]
+    merged = _merge_histories_prefer_existing(base=bootstrap_bars, existing=hist)
 
     if VERBOSE_BOOTSTRAP:
         log(f"🧪 Bootstrapped history for {symbol}: {len(merged)} days.")
@@ -448,14 +541,7 @@ def _ensure_bootstrap_history_if_needed(
 # -------------------------------------------------------------------
 # Local node helper (replaces ensure_symbol_fields)
 # -------------------------------------------------------------------
-
 def _ensure_symbol_node(rolling: Dict[str, Any], sym_u: str) -> Dict[str, Any]:
-    """
-    Minimal per-symbol scaffolding:
-      - guarantees 'symbol' and 'history' keys exist.
-    All other normalization (predictions/context/news/social/policy, sector
-    normalization, etc.) is handled centrally in backend.core.data_pipeline.save_rolling().
-    """
     node = rolling.get(sym_u)
     if not isinstance(node, dict):
         node = {"symbol": sym_u, "history": []}
@@ -469,20 +555,7 @@ def _ensure_symbol_node(rolling: Dict[str, Any], sym_u: str) -> Dict[str, Any]:
 # -------------------------------------------------------------------
 # Main backfill routine (same external API)
 # -------------------------------------------------------------------
-
 def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int = 8) -> int:
-    """
-    Perform full or incremental Rolling backfill.
-
-    Called from:
-        backend/jobs/nightly_job.py
-        or CLI: python -m backend.services.backfill_history --min_days 180
-
-    Mode:
-        - If rolling is empty → 'fallback' full rebuild using SA bundle (+ YF bootstrap)
-        - Otherwise → 'full' bundle-based refresh (plus per-symbol YF bootstrap if history < min_days)
-        - Incremental branch kept for compatibility, but rarely used.
-    """
     rolling = _read_rolling() or {}
     today = datetime.utcnow().strftime("%Y-%m-%d")
     mode = "full"
@@ -491,7 +564,6 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
         log("⚠️ Rolling cache missing — forcing full rebuild.")
     log(f"🧩 Backfill mode: {mode.upper()} | Date: {today}")
 
-    # If caller didn't specify symbols, derive from existing rolling keys (skip meta)
     if not symbols:
         symbols = [s for s in rolling.keys() if not s.startswith("_")]
 
@@ -507,10 +579,9 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
     # FULL / FALLBACK MODE — bundle-based refresh + bootstrap
     # ----------------------------------------------------------
     if mode in ("full", "fallback"):
-        log(f"🔧 Starting full rolling backfill for {total} symbols (batch SA fetch + YF bootstrap)…")
+        log(f"🔧 Starting full rolling backfill for {total} symbols (batch SA fetch + HF/YF bootstrap)…")
         sa_bundle = fetch_sa_bundle_parallel(max_workers=max_workers)
         if sa_bundle:
-            # Optionally rebuild metrics cache for other services.
             try:
                 build_latest_metrics()
             except Exception as e:
@@ -518,21 +589,29 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
         else:
             log("⚠️ Empty SA bundle.")
 
+        # Optional: enable limited recent patching via yfinance for a capped number of symbols.
+        # We compute this list up-front (deterministic ordering) so you can reason about runtime.
+        patch_symbols: set[str] = set()
+        if YF_PATCH_RECENT_DAYS > 0 and YF_PATCH_MAX_SYMBOLS > 0:
+            for s in symbols[:YF_PATCH_MAX_SYMBOLS]:
+                patch_symbols.add(str(s).upper())
+            log(f"🩹 YF recent patch enabled: days={YF_PATCH_RECENT_DAYS}, max_symbols={len(patch_symbols)}")
+
         def _process(sym: str) -> int:
             sym_u = sym.upper()
-            # Ensure node structure exists
             node = _ensure_symbol_node(rolling, sym_u)
 
-            # Ensure multi-day history via YF if too short
             hist = node.get("history") or []
             hist = _ensure_bootstrap_history_if_needed(sym_u, hist, min_days=min_days)
 
+            # Optional: patch recent days (limited)
+            if sym_u in patch_symbols:
+                hist = _patch_recent_days_yf(sym_u, hist, days=YF_PATCH_RECENT_DAYS)
+
             sa = sa_bundle.get(sym_u) if sa_bundle else None
             if not sa:
-                # Still save bootstrapped history if we have it
                 if hist:
                     node["history"] = hist
-                    # Derive close/price from latest history bar as a robust fallback
                     try:
                         last_bar = hist[-1]
                         node["close"] = last_bar.get("close")
@@ -552,18 +631,16 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
                 "volume": sa.get("volume"),
             }
 
-            # Per-date dedupe (append-only semantics) ------------------
+            # Append-only + per-date dedupe
             by_date: Dict[str, Dict[str, Any]] = {}
             for bar in hist or []:
                 d = str(bar.get("date"))
-                if not d:
-                    continue
-                by_date[d] = bar
+                if d:
+                    by_date[d] = bar
             by_date[today] = latest_bar
             hist_new = list(by_date.values())
             hist_new.sort(key=lambda x: x.get("date") or "")
             hist_new = hist_new[-MAX_HISTORY_DAYS:]
-            # ---------------------------------------------------------
 
             node["history"] = hist_new
             node["close"] = latest_bar.get("close")
@@ -573,7 +650,7 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futs = {ex.submit(_process, s): s for s in symbols}
-            for fut in progress_bar(as_completed(futs), desc="Backfill (bundle+YF)", unit="sym", total=total):
+            for fut in progress_bar(as_completed(futs), desc="Backfill (bundle+HF/YF)", unit="sym", total=total):
                 updated += fut.result()
 
     # ----------------------------------------------------------
@@ -585,10 +662,8 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
             node = _ensure_symbol_node(rolling, sym_u)
 
             hist = node.get("history") or []
-            # Ensure enough history first
             hist = _ensure_bootstrap_history_if_needed(sym_u, hist, min_days=min_days)
 
-            # If already have today's bar, skip
             if hist and str(hist[-1].get("date")) == today:
                 node["history"] = hist
                 rolling[sym_u] = node
@@ -596,7 +671,6 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
 
             sa = _fetch_from_stockanalysis(sym_u)
             if not sa:
-                # Still persist bootstrapped history if we have it
                 if hist:
                     node["history"] = hist
                     try:
@@ -618,13 +692,11 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
                 "volume": sa.get("volume"),
             }
 
-            # Per-date dedupe
             by_date: Dict[str, Dict[str, Any]] = {}
             for bar in hist or []:
                 d = str(bar.get("date"))
-                if not d:
-                    continue
-                by_date[d] = bar
+                if d:
+                    by_date[d] = bar
             by_date[today] = latest_bar
             hist_new = list(by_date.values())
             hist_new.sort(key=lambda x: x.get("date") or "")
@@ -642,29 +714,28 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
             for fut in progress_bar(as_completed(futs), desc="Backfill (incremental)", unit="sym", total=total):
                 updated += fut.result()
 
-    # ----------------------------------------------------------
-    # Save rolling via new core helper (atomic + backups)
-    # ----------------------------------------------------------
     save_rolling(rolling)
 
     dur = time.time() - start
     log(f"✅ Backfill ({mode}) complete — {updated}/{total} updated in {dur:.1f}s.")
+    if USE_HF_BOOTSTRAP:
+        log("ℹ️ HF bootstrap enabled (requires 'defeatbeta-api' installed).")
+    if YF_PATCH_RECENT_DAYS > 0:
+        log(f"ℹ️ YF recent patch days={YF_PATCH_RECENT_DAYS}, max_symbols={YF_PATCH_MAX_SYMBOLS} (see env vars).")
     return updated
 
 
 # -------------------------------------------------------------------
 # CLI
 # -------------------------------------------------------------------
-
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="AION Rolling Backfill (Batch SA + YF Bootstrap, New Core)")
+    parser = argparse.ArgumentParser(description="AION Rolling Backfill (Batch SA + HF/YF Bootstrap, New Core)")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--min_days", type=int, default=180)
     args = parser.parse_args()
 
-    # 🚀 Load universe instead of rolling keys
     symbols = load_universe()
 
     if not symbols:
