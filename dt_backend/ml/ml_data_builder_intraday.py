@@ -73,6 +73,150 @@ def _merge_news_into_features(sym: str, feats: Dict[str, Any], intel: Dict[str, 
 # -------------------------------
 # Timestamp inference
 # -------------------------------
+
+# -------------------------------------------------------------------
+# Fallback: derive the same features_dt-style fields from intraday bars
+# -------------------------------------------------------------------
+
+def _trend_label(r: float, strong: float = 0.01, mild: float = 0.003) -> str:
+    """Small, stable trend labeler (kept in-sync with context_state_dt defaults)."""
+    try:
+        r = float(r)
+    except Exception:
+        r = 0.0
+    if r >= strong:
+        return "strong_up"
+    if r >= mild:
+        return "up"
+    if r <= -strong:
+        return "strong_down"
+    if r <= -mild:
+        return "down"
+    return "flat"
+
+
+def _vol_bucket(v: float) -> str:
+    """Coarse volatility bucket."""
+    try:
+        v = float(v)
+    except Exception:
+        v = 0.0
+    if v < 0.002:
+        return "low"
+    if v < 0.006:
+        return "mid"
+    return "high"
+
+
+def _rsi_last(close_s, period: int = 14) -> float:
+    """RSI(14) on close series; returns last value."""
+    try:
+        delta = close_s.diff()
+        up = delta.clip(lower=0)
+        down = (-delta).clip(lower=0)
+        roll_up = up.ewm(alpha=1.0 / float(period), adjust=False).mean()
+        roll_down = down.ewm(alpha=1.0 / float(period), adjust=False).mean()
+        rs = roll_up / (roll_down + 1e-12)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        val = float(rsi.iloc[-1])
+        if val != val:
+            return 50.0
+        return val
+    except Exception:
+        return 50.0
+
+
+def _compute_features_from_bars(node: Dict[str, Any]) -> Dict[str, Any] | None:
+    """
+    If features_dt is missing, compute a compatible feature dict from intraday bars.
+
+    Uses node['bars_intraday'] first, then falls back to node['bars_intraday_5m'].
+    """
+    bars = node.get("bars_intraday")
+    if not isinstance(bars, list) or not bars:
+        bars = node.get("bars_intraday_5m")
+    if not isinstance(bars, list) or len(bars) < 5:
+        return None
+
+    closes = []
+    opens = []
+    highs = []
+    lows = []
+
+    def _sf(x, default=0.0) -> float:
+        try:
+            return float(x)
+        except Exception:
+            return float(default)
+
+    for b in bars:
+        if not isinstance(b, dict):
+            continue
+        c = b.get("close")
+        if c is None:
+            c = b.get("c") or b.get("price") or b.get("p")
+        if c is None:
+            continue
+        o = b.get("open")
+        if o is None:
+            o = b.get("o")
+        h = b.get("high")
+        if h is None:
+            h = b.get("h")
+        l = b.get("low")
+        if l is None:
+            l = b.get("l")
+
+        cv = _sf(c, None)
+        closes.append(cv)
+        opens.append(_sf(o, cv))
+        highs.append(_sf(h, cv))
+        lows.append(_sf(l, cv))
+
+    if len(closes) < 5:
+        return None
+
+    pd = _lazy_pd()
+    close_s = pd.Series(closes, dtype="float64")
+
+    last_price = float(close_s.iloc[-1])
+    first_open = float(opens[0] if opens else close_s.iloc[0])
+    base = first_open if abs(first_open) > 1e-12 else (last_price if abs(last_price) > 1e-12 else 1.0)
+
+    pct_chg_from_open = float((last_price / base) - 1.0)
+    intraday_return = pct_chg_from_open
+
+    rets = close_s.pct_change().dropna()
+    intraday_vol = float(rets.tail(60).std() if len(rets) else 0.0)
+    intraday_range = float(((max(highs) - min(lows)) / base) if highs and lows else 0.0)
+
+    sma_5 = float(close_s.tail(5).mean())
+    sma_20 = float(close_s.tail(20).mean() if len(close_s) >= 20 else close_s.mean())
+    ema_9 = float(close_s.ewm(span=9, adjust=False).mean().iloc[-1])
+
+    rsi_14 = float(_rsi_last(close_s, period=14))
+
+    sma_5_over_sma_20 = float((sma_5 / sma_20) if abs(sma_20) > 1e-12 else 1.0)
+
+    intraday_trend = _trend_label(intraday_return)
+    vol_bucket = _vol_bucket(intraday_vol)
+
+    return {
+        "last_price": last_price,
+        "pct_chg_from_open": pct_chg_from_open,
+        "sma_5": sma_5,
+        "sma_20": sma_20,
+        "ema_9": ema_9,
+        "sma_5_over_sma_20": sma_5_over_sma_20,
+        "rsi_14": rsi_14,
+        "intraday_vol": intraday_vol,
+        "intraday_return": intraday_return,
+        "intraday_range": intraday_range,
+        "intraday_trend": intraday_trend,
+        "vol_bucket": vol_bucket,
+        "has_intraday_data": 1.0,
+    }
+
 def _infer_ts(node: Dict[str, Any]) -> datetime | None:
     feats = node.get("features_dt") or {}
     ts_raw = feats.get("ts") or feats.get("timestamp")
@@ -238,6 +382,17 @@ def build_intraday_dataset(max_symbols: int | None = None) -> Dict[str, Any]:
 
     items = [(sym, node) for sym, node in rolling.items() if not str(sym).startswith("_")]
     items.sort(key=lambda kv: kv[0])
+    # Quick sanity: how much signal do we actually have in rolling?
+    try:
+        n_syms = len(items)
+        n_feats = sum(1 for _, n in items if isinstance(n, dict) and isinstance(n.get('features_dt'), dict) and n.get('features_dt'))
+        n_bars = sum(1 for _, n in items if isinstance(n, dict) and isinstance(n.get('bars_intraday'), list) and len(n.get('bars_intraday') or []) > 0)
+        log(f"[dt_ml_builder] ℹ️ rolling symbols={n_syms} | features_dt={n_feats} | bars_intraday={n_bars}")
+        if n_feats == 0 and n_bars > 0:
+            log("[dt_ml_builder] ℹ️ features_dt missing on disk; will derive features from bars_intraday for dataset build.")
+    except Exception:
+        pass
+
 
     if max_symbols is not None:
         items = items[: max(0, int(max_symbols))]
@@ -249,6 +404,8 @@ def build_intraday_dataset(max_symbols: int | None = None) -> Dict[str, Any]:
             continue
 
         feats_raw = node.get("features_dt") or {}
+        if not isinstance(feats_raw, dict) or not feats_raw:
+            feats_raw = _compute_features_from_bars(node) or {}
         if not isinstance(feats_raw, dict) or not feats_raw:
             continue
 
