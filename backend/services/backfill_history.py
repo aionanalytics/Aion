@@ -558,12 +558,13 @@ def _ensure_bootstrap_history_if_needed(
     # Need bootstrap
     yf_bars = _bootstrap_history_yf(symbol, max_days=MAX_HISTORY_DAYS)
     if not yf_bars:
-        # NEW: record YF miss for later universe prune
-        try:
-            with _YF_NO_DATA_LOCK:
-                _YF_NO_DATA.add(symbol)
-        except Exception:
-            pass
+        # Only record as "bad" if YFinance was actually enabled and attempted
+        if YF_BOOTSTRAP_ENABLED:
+            try:
+                with _YF_NO_DATA_LOCK:
+                    _YF_NO_DATA.add(symbol)
+            except Exception:
+                pass
         return hist
 
     by_date: Dict[str, Dict[str, Any]] = {}
@@ -871,13 +872,14 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
     # ----------------------------------------------------------
     # NEW: Prune universe for symbols that YFinance couldn't bootstrap
     # ----------------------------------------------------------
-    try:
-        with _YF_NO_DATA_LOCK:
-            bad = set(_YF_NO_DATA)
+    if YF_BOOTSTRAP_ENABLED:
+        try:
+            with _YF_NO_DATA_LOCK:
+                bad = set(_YF_NO_DATA)
 
-        if bad:
-            removed = 0
-            removed += _prune_universe_file(UNIVERSE_FILE, bad)
+            if bad:
+                removed = 0
+                removed += _prune_universe_file(UNIVERSE_FILE, bad)
 
             # Optional: if you later add swing/dt split universe files,
             # keep swing in sync automatically if it exists.
