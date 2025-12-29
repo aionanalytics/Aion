@@ -1,6 +1,6 @@
 # backend/services/backfill_history.py
 """
-backfill_history.py — v3.4 (+ universe auto-prune on YF miss)
+backfill_history.py — v3.3 (+ safe universe auto-prune on YF miss)
 (Rolling-Native, Normalized Batch StockAnalysis Bundle, YF History Bootstrap)
 
 Purpose:
@@ -25,11 +25,12 @@ NEW in v3.3:
   to backend.core.data_pipeline.save_rolling().
 - Skips meta keys starting with '_' when deriving symbol list from Rolling.
 
-ADD-ON:
-- If YFinance bootstrap returns ZERO bars for a symbol that needs bootstrap,
-  auto-prune that symbol from the swing universe JSON after the run.
-  (DT is unaffected; DT uses Alpaca.)
-
+ADD-ON (safe):
+- Track symbols where YFinance bootstrap returned 0 bars (only when YF is enabled),
+  and optionally prune them from master_universe.json after the run.
+- Safety cap prevents mass-deletes if YF is rate-limited/outage:
+    AION_PRUNE_MAX_RATIO (default 0.05) limits prune to <= 5% of symbols per run.
+- Pruning is disabled automatically when AION_YF_BOOTSTRAP=0.
 """
 
 from __future__ import annotations
@@ -40,8 +41,7 @@ import gzip
 import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Iterable
-from typing import Optional, Set
+from typing import Any, Dict, List, Iterable, Set
 from pathlib import Path
 from threading import Lock
 
@@ -65,22 +65,9 @@ UNIVERSE_FILE = PATHS["universe"] / "master_universe.json"
 VERBOSE_BOOTSTRAP = False          # per-ticker “Bootstrapped history for XYZ…”
 VERBOSE_BOOTSTRAP_ERRORS = False   # per-ticker YF failure messages
 
-
 # -------------------------------------------------------------------
-# YFinance safety knobs (rate limit mitigation)
+# YF bootstrap toggle + prune safety
 # -------------------------------------------------------------------
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(str(os.environ.get(name, "") or default).strip())
-    except Exception:
-        return default
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(str(os.environ.get(name, "") or default).strip())
-    except Exception:
-        return default
-
 def _env_bool(name: str, default: bool = False) -> bool:
     v = (os.environ.get(name, "") or "").strip().lower()
     if v == "":
@@ -91,36 +78,20 @@ def _env_bool(name: str, default: bool = False) -> bool:
         return False
     return default
 
-# Enable YF bootstrap (kept ON by default for backward compatibility).
-# Set AION_YF_BOOTSTRAP=0 to completely disable YFinance usage.
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(str(os.environ.get(name, "") or default).strip())
+    except Exception:
+        return default
+
+# Keep default=True so behavior matches the original v3.3 unless you explicitly disable it
 YF_BOOTSTRAP_ENABLED = _env_bool("AION_YF_BOOTSTRAP", default=True)
 
-# Hard cap concurrent YF calls (critical: backfill itself is multi-threaded)
-YF_MAX_CONCURRENCY = max(1, _env_int("AION_YF_MAX_CONCURRENCY", 1))
-YF_MIN_SPACING_SECONDS = max(0.0, _env_float("AION_YF_MIN_SPACING_SECONDS", 0.15))
-YF_MAX_RETRIES = max(0, _env_int("AION_YF_MAX_RETRIES", 5))
-YF_BACKOFF_SECONDS = max(0.25, _env_float("AION_YF_BACKOFF_SECONDS", 2.0))
+# Safety: refuse to prune a huge chunk in one run
+PRUNE_MAX_RATIO = max(0.0, min(1.0, _env_float("AION_PRUNE_MAX_RATIO", 0.05)))
 
-_YF_SEM = None  # initialized lazily to avoid import-order surprises
-_YF_LAST_CALL_TS = 0.0
-_YF_TS_LOCK = Lock()
-
-def _yf_semaphore() -> "Lock":
-    # Lazily create semaphore-like lock pool.
-    # Using threading.Semaphore but typed loosely to keep py3.10/3.12 happy.
-    global _YF_SEM
-    if _YF_SEM is None:
-        try:
-            import threading
-            _YF_SEM = threading.Semaphore(int(YF_MAX_CONCURRENCY))
-        except Exception:
-            _YF_SEM = Lock()
-    return _YF_SEM
-
-# -------------------------------------------------------------------
-# NEW: Track symbols that fail YFinance bootstrap (thread-safe)
-# -------------------------------------------------------------------
-_YF_NO_DATA: set[str] = set()
+# Track YF no-data cases for end-of-run prune (thread-safe)
+_YF_NO_DATA: Set[str] = set()
 _YF_NO_DATA_LOCK = Lock()
 
 
@@ -410,123 +381,57 @@ def fetch_sa_bundle_parallel(max_workers: int = 8) -> Dict[str, Dict[str, Any]]:
 # YF history bootstrap helpers
 # -------------------------------------------------------------------
 
-
 def _bootstrap_history_yf(symbol: str, max_days: int = MAX_HISTORY_DAYS) -> List[Dict[str, Any]]:
     """
     Fetch up to ~3 years of daily bars from YFinance for a symbol.
     Returns list of {date, open, high, low, close, volume}.
 
-    IMPORTANT:
-      - This call is rate-limit prone and must be concurrency-capped.
-      - We use a global semaphore + minimum spacing + exponential backoff.
-      - If YF is disabled (AION_YF_BOOTSTRAP=0), returns [] immediately.
+    If AION_YF_BOOTSTRAP=0, returns [] immediately.
     """
     if not YF_BOOTSTRAP_ENABLED:
         return []
 
     symbol = symbol.upper()
-
-    # Optional: yfinance exposes a dedicated error type in newer versions.
     try:
-        from yfinance.exceptions import YFRateLimitError  # type: ignore
-    except Exception:
-        YFRateLimitError = Exception  # type: ignore
+        df = yf.download(
+            tickers=symbol,
+            interval="1d",
+            period="3y",         # ~3 calendar years
+            auto_adjust=False,   # explicit → no FutureWarning
+            progress=False,
+            threads=False,       # reduce internal fan-out
+        )
+        if df is None or df.empty:
+            return []
 
-    sem = _yf_semaphore()
+        # Drop rows with all-NaN OHLCV
+        cols = ["Open", "High", "Low", "Close", "Volume"]
+        df = df[cols].dropna(how="all")
 
-    def _respect_spacing():
-        global _YF_LAST_CALL_TS
-        try:
-            with _YF_TS_LOCK:
-                now = time.time()
-                wait = float(YF_MIN_SPACING_SECONDS) - (now - float(_YF_LAST_CALL_TS))
-                if wait > 0:
-                    time.sleep(wait)
-                _YF_LAST_CALL_TS = time.time()
-        except Exception:
-            pass
-
-    # Retry loop
-    tries = 0
-    backoff = float(YF_BACKOFF_SECONDS)
-
-    while True:
-        tries += 1
-        try:
-            # Concurrency cap
-            try:
-                sem.acquire()
-            except Exception:
-                pass
-
-            _respect_spacing()
-
-            df = yf.download(
-                tickers=symbol,
-                interval="1d",
-                period="3y",         # ~3 calendar years
-                auto_adjust=False,   # explicit → no FutureWarning
-                progress=False,
-                threads=False,       # yfinance internal threading can amplify rate limits
+        bars: List[Dict[str, Any]] = []
+        # itertuples gives us plain Python scalars → no FutureWarning
+        for idx, open_, high, low, close, volume in df.itertuples():
+            bars.append(
+                {
+                    "date": idx.strftime("%Y-%m-%d"),
+                    "open": float(open_ or 0.0),
+                    "high": float(high or 0.0),
+                    "low": float(low or 0.0),
+                    "close": float(close or 0.0),
+                    "volume": float(volume or 0.0),
+                }
             )
 
-            if df is None or df.empty:
-                return []
-
-            cols = ["Open", "High", "Low", "Close", "Volume"]
-            df = df[cols].dropna(how="all")
-
-            bars: List[Dict[str, Any]] = []
-            for idx, open_, high, low, close, volume in df.itertuples():
-                bars.append(
-                    {
-                        "date": idx.strftime("%Y-%m-%d"),
-                        "open": float(open_ or 0.0),
-                        "high": float(high or 0.0),
-                        "low": float(low or 0.0),
-                        "close": float(close or 0.0),
-                        "volume": float(volume or 0.0),
-                    }
-                )
-
-            if not bars:
-                return []
-
-            return bars[-max_days:]
-
-        except KeyboardInterrupt:
-            # If you really did Ctrl+C, honor it.
-            raise
-        except (YFRateLimitError,) as e:
-            # Hard rate limit — backoff and retry.
-            if tries <= int(YF_MAX_RETRIES):
-                if VERBOSE_BOOTSTRAP_ERRORS:
-                    log(f"⚠️ YF rate limited for {symbol} (try {tries}/{YF_MAX_RETRIES}): {e}")
-                time.sleep(backoff)
-                backoff = min(backoff * 1.8, 60.0)
-                continue
-            if VERBOSE_BOOTSTRAP_ERRORS:
-                log(f"⚠️ YF rate limit giving up for {symbol}: {e}")
+        if not bars:
             return []
-        except Exception as e:
-            # Many yfinance versions throw generic Exceptions with "Too Many Requests"
-            msg = str(e)
-            is_rl = ("Too Many Requests" in msg) or ("rate limit" in msg.lower())
-            if is_rl and tries <= int(YF_MAX_RETRIES):
-                if VERBOSE_BOOTSTRAP_ERRORS:
-                    log(f"⚠️ YF rate limited for {symbol} (try {tries}/{YF_MAX_RETRIES}): {msg}")
-                time.sleep(backoff)
-                backoff = min(backoff * 1.8, 60.0)
-                continue
 
-            if VERBOSE_BOOTSTRAP_ERRORS:
-                log(f"⚠️ YF bootstrap failed for {symbol}: {e}")
-            return []
-        finally:
-            try:
-                sem.release()
-            except Exception:
-                pass
+        # Keep only the most recent max_days bars
+        return bars[-max_days:]
+
+    except Exception as e:
+        if VERBOSE_BOOTSTRAP_ERRORS:
+            log(f"⚠️ YF bootstrap failed for {symbol}: {e}")
+        return []
 
 
 def _unique_history_dates(hist: List[Dict[str, Any]]) -> set[str]:
@@ -545,9 +450,9 @@ def _ensure_bootstrap_history_if_needed(
     - YF bars are only used for dates missing in existing history.
     - Result is sorted by date and capped at MAX_HISTORY_DAYS.
 
-    ADD-ON:
-    - If bootstrap is needed and YF returns zero bars, record this symbol
-      for universe pruning after the run.
+    Add-on:
+    - If bootstrap is needed and YF returns zero bars, record this symbol for pruning
+      (only if YF is enabled).
     """
     symbol = symbol.upper()
     existing_dates = _unique_history_dates(hist)
@@ -558,7 +463,7 @@ def _ensure_bootstrap_history_if_needed(
     # Need bootstrap
     yf_bars = _bootstrap_history_yf(symbol, max_days=MAX_HISTORY_DAYS)
     if not yf_bars:
-        # Only record as "bad" if YFinance was actually enabled and attempted
+        # Record as "bad" ONLY if YF is enabled (otherwise we'd nuke the universe)
         if YF_BOOTSTRAP_ENABLED:
             try:
                 with _YF_NO_DATA_LOCK:
@@ -707,9 +612,6 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
         log("⚠️ Rolling cache missing — forcing full rebuild.")
     log(f"🧩 Backfill mode: {mode.upper()} | Date: {today}")
 
-    # NEW: track how many were pruned (for end-of-run log)
-    pruned_total = 0
-
     # If caller didn't specify symbols, derive from existing rolling keys (skip meta)
     if not symbols:
         symbols = [s for s in rolling.keys() if not s.startswith("_")]
@@ -744,9 +646,7 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
 
             # Ensure multi-day history via YF if too short
             hist = node.get("history") or []
-            if mode != "fallback":
-                hist = _ensure_bootstrap_history_if_needed(sym_u, hist, min_days=min_days)
-
+            hist = _ensure_bootstrap_history_if_needed(sym_u, hist, min_days=min_days)
 
             sa = sa_bundle.get(sym_u) if sa_bundle else None
             if not sa:
@@ -807,8 +707,7 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
 
             hist = node.get("history") or []
             # Ensure enough history first
-            if mode != "fallback":
-                hist = _ensure_bootstrap_history_if_needed(sym_u, hist, min_days=min_days)
+            hist = _ensure_bootstrap_history_if_needed(sym_u, hist, min_days=min_days)
 
             # If already have today's bar, skip
             if hist and str(hist[-1].get("date")) == today:
@@ -878,24 +777,32 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
                 bad = set(_YF_NO_DATA)
 
             if bad:
-                removed = 0
-                removed += _prune_universe_file(UNIVERSE_FILE, bad)
+                max_allowed = int(max(1, round(PRUNE_MAX_RATIO * float(total))))
+                if len(bad) > max_allowed:
+                    log(
+                        f"⚠️ Universe auto-prune SKIPPED: {len(bad)} symbols flagged, "
+                        f"cap={max_allowed} (AION_PRUNE_MAX_RATIO={PRUNE_MAX_RATIO})."
+                    )
+                else:
+                    removed = 0
+                    removed += _prune_universe_file(UNIVERSE_FILE, bad)
 
-                # Optional: if you later add swing/dt split universe files,
-                # keep swing in sync automatically if it exists.
-                swing_file = PATHS["universe"] / "swing_universe.json"
-                if swing_file.exists():
-                    removed += _prune_universe_file(swing_file, bad)
+                    swing_file = PATHS["universe"] / "swing_universe.json"
+                    if swing_file.exists():
+                        removed += _prune_universe_file(swing_file, bad)
 
-                pruned_total = int(removed)
-
-                log(
-                    f"🧹 Universe auto-prune: removed {removed} symbols "
-                    f"(YFinance bootstrap returned 0 bars)."
-                )
+                    log(
+                        f"🧹 Universe auto-prune: removed {removed} symbols "
+                        f"(YFinance bootstrap returned 0 bars)."
+                    )
 
         except Exception as e:
             log(f"⚠️ Universe prune step failed: {e}")
+
+    dur = time.time() - start
+    log(f"✅ Backfill ({mode}) complete — {updated}/{total} updated in {dur:.1f}s.")
+    return updated
+
 
 # -------------------------------------------------------------------
 # CLI
