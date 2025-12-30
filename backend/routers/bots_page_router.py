@@ -1,21 +1,22 @@
-# backend/routers/bots_page_router.py
-
 """
+backend/routers/bots_page_router.py
+
 Unified Bots Page API — AION Analytics
 
-This router makes the frontend dead simple:
-  - one call to fetch everything the Bots page needs
-  - best-effort: sub-errors do NOT kill the whole response
-  - also exposes a "tape" (signals + fills) by reading artifacts
+One endpoint the frontend can hit:
+  GET /api/bots/page   (alias: /api/bots/overview)
 
-Mount it twice:
-  /api/bots/page
-  /api/backend/bots/page
+It bundles:
+  - swing (EOD): status/configs/log days
+  - intraday: status/configs/log days/pnl last day
+  - best-effort: intraday signals + recent fills (file-based)
 """
 
 from __future__ import annotations
 
 import gzip
+import importlib
+import inspect
 import json
 import traceback
 from datetime import datetime
@@ -25,19 +26,18 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter
 
 try:
-    from backend.core.config import PATHS
+    from backend.core.config import PATHS, TIMEZONE
 except Exception:
-    # tolerate older builds
-    from backend.config import PATHS  # type: ignore
-
-try:
-    from backend.core.config import TIMEZONE
-except Exception:
-    from settings import TIMEZONE  # type: ignore
+    # tolerate older config import shape
+    from backend.config import PATHS, TIMEZONE  # type: ignore
 
 
-router = APIRouter(tags=["bots-page"])
+router = APIRouter(prefix="/api/bots", tags=["bots-page"])
 
+
+# -------------------------
+# Helpers
+# -------------------------
 
 def _err(e: Exception) -> Dict[str, Any]:
     return {
@@ -46,28 +46,45 @@ def _err(e: Exception) -> Dict[str, Any]:
     }
 
 
+def _import_module(name: str):
+    """Import a module by absolute path, bypassing backend.routers __init__ aliases."""
+    return importlib.import_module(name)
+
+
+async def _call(mod: Any, fn_name: str, *args, **kwargs):
+    fn = getattr(mod, fn_name, None)
+    if fn is None or not callable(fn):
+        raise AttributeError(f"Module '{getattr(mod, '__name__', mod)}' has no callable '{fn_name}'")
+    out = fn(*args, **kwargs)
+    if inspect.isawaitable(out):
+        return await out
+    return out
+
+
 def _read_json(path: Path) -> Optional[Any]:
     try:
-        if not path.exists():
-            return None
-        with path.open("r", encoding="utf-8") as f:
-            return json.load(f)
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
 
 
-def _read_json_gz(path: Path) -> Optional[Any]:
+def _read_gz_json(path: Path) -> Optional[Any]:
     try:
-        if not path.exists():
-            return None
         with gzip.open(path, "rt", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
 
 
-def _first_existing(paths: List[Path]) -> Optional[Path]:
-    for p in paths:
+def _mtime_iso(path: Path) -> Optional[str]:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=TIMEZONE).isoformat()
+    except Exception:
+        return None
+
+
+def _first_existing(candidates: List[Path]) -> Optional[Path]:
+    for p in candidates:
         try:
             if p.exists():
                 return p
@@ -76,70 +93,28 @@ def _first_existing(paths: List[Path]) -> Optional[Path]:
     return None
 
 
-def _as_list(x: Any) -> List[Any]:
-    return x if isinstance(x, list) else []
+# -------------------------
+# Intraday file helpers (best-effort)
+# -------------------------
 
-
-def _walk_collect_trade_like(obj: Any, out: List[Dict[str, Any]]) -> None:
+def _paths_dt() -> Tuple[Path, Path]:
     """
-    Crawl unknown JSON shapes and collect dicts that smell like fills/trades.
-    We keep it permissive on purpose.
+    Return (ML_DATA_DT, DATA_DT) with safe fallbacks.
     """
-    if isinstance(obj, dict):
-        # "trade-ish" heuristic
-        keys = set(obj.keys())
-        if ("symbol" in keys) and (("side" in keys) or ("action" in keys)) and (("price" in keys) or ("fill_price" in keys)):
-            out.append(obj)  # keep raw; UI will pick fields best-effort
-
-        for v in obj.values():
-            _walk_collect_trade_like(v, out)
-
-    elif isinstance(obj, list):
-        for v in obj:
-            _walk_collect_trade_like(v, out)
+    root = Path(PATHS.get("root", ".")).resolve()
+    ml_data_dt = Path(PATHS.get("ml_data_dt", root / "ml_data_dt"))
+    data_dt = Path(PATHS.get("data_dt", root / "data_dt"))
+    return ml_data_dt, data_dt
 
 
-def _normalize_fills(raw: List[Dict[str, Any]], limit: int = 50) -> List[Dict[str, Any]]:
+def _load_intraday_signals_best_effort(limit: int = 50) -> Dict[str, Any]:
     """
-    Normalize some common key variants into a shallow fill object.
-    Keep extra fields too.
+    Try to read intraday signals from known output files.
+    Your logs show:
+      /home/aion/aion/Aion_Analytics/data_dt/signals/intraday/predictions/intraday_predictions.json
+      /home/aion/aion/Aion_Analytics/ml_data_dt/signals/intraday/ranks/prediction_rank_fetch.json.gz
     """
-    normed: List[Dict[str, Any]] = []
-    for r in raw:
-        if not isinstance(r, dict):
-            continue
-        sym = r.get("symbol") or r.get("ticker")
-        if not sym:
-            continue
-
-        side = (r.get("side") or r.get("action") or r.get("type") or "").upper() or None
-        ts = r.get("ts") or r.get("time") or r.get("timestamp") or r.get("filled_at") or r.get("created_at")
-
-        qty = r.get("qty") or r.get("quantity") or r.get("shares")
-        price = r.get("price") or r.get("fill_price") or r.get("avg_price")
-
-        item = {
-            "ts": ts,
-            "symbol": str(sym),
-            "side": side,
-            "qty": qty,
-            "price": price,
-            "pnl": r.get("pnl") or r.get("realized_pnl"),
-            **r,  # keep raw too
-        }
-        normed.append(item)
-
-    # best-effort sort (strings sort OK for ISO times)
-    normed.sort(key=lambda x: str(x.get("ts") or ""), reverse=True)
-    return normed[:limit]
-
-
-def _load_intraday_signals() -> Tuple[Optional[str], List[Dict[str, Any]]]:
-    """
-    Try to load the most recent intraday signals from known artifact locations.
-    """
-    data_dt = Path(PATHS.get("data_dt", "data_dt"))
-    ml_data_dt = Path(PATHS.get("ml_data_dt", "ml_data_dt"))
+    ml_data_dt, data_dt = _paths_dt()
 
     candidates = [
         data_dt / "signals" / "intraday" / "predictions" / "intraday_predictions.json",
@@ -149,107 +124,137 @@ def _load_intraday_signals() -> Tuple[Optional[str], List[Dict[str, Any]]]:
 
     p = _first_existing(candidates)
     if not p:
-        return None, []
+        return {"updated_at": None, "signals": []}
 
-    obj = _read_json_gz(p) if p.suffix.endswith(".gz") else _read_json(p)
-    if obj is None:
-        return None, []
+    js = _read_gz_json(p) if p.suffix.endswith(".gz") else _read_json(p)
+    items: List[Dict[str, Any]] = []
 
-    # We accept a few shapes:
-    #  - {"signals": [...]} / {"top": [...]} / {"items":[...]}
-    #  - {"results":[...]} / {"buy":[...], "sell":[...]}
-    #  - a raw list
-    if isinstance(obj, list):
-        arr = obj
-    elif isinstance(obj, dict):
-        arr = (
-            _as_list(obj.get("signals"))
-            or _as_list(obj.get("items"))
-            or _as_list(obj.get("top"))
-            or _as_list(obj.get("results"))
-        )
-        # if it's split buy/sell, merge
-        if not arr:
-            buy = _as_list(obj.get("buy"))
-            sell = _as_list(obj.get("sell"))
-            arr = buy + sell
-    else:
-        arr = []
+    # Normalize to a list of dict rows
+    if isinstance(js, list):
+        items = [x for x in js if isinstance(x, dict)]
+    elif isinstance(js, dict):
+        for k in ("signals", "results", "items", "top"):
+            v = js.get(k)
+            if isinstance(v, list):
+                items = [x for x in v if isinstance(x, dict)]
+                break
+        if not items:
+            # sometimes the file itself is {symbol: {...}}
+            if all(isinstance(v, dict) for v in js.values()):
+                items = [v for v in js.values() if isinstance(v, dict)]
 
-    # best-effort updated time from file mtime
-    try:
-        updated_at = datetime.fromtimestamp(p.stat().st_mtime, tz=TIMEZONE).isoformat()
-    except Exception:
-        updated_at = None
-
-    # normalize lightly to match your UI expectations
-    out: List[Dict[str, Any]] = []
-    for r in arr:
-        if not isinstance(r, dict):
-            continue
-        sym = r.get("symbol") or r.get("ticker")
-        if not sym:
-            continue
-        act = (r.get("action") or r.get("side") or r.get("signal") or "").upper() or None
-        ts = r.get("ts") or r.get("time") or r.get("timestamp") or r.get("updated_at")
-        conf = r.get("confidence") or r.get("conf") or r.get("p_hit") or r.get("prob")
-        out.append({"ts": ts, "symbol": str(sym), "action": act, "confidence": conf, **r})
-
-    return updated_at, out[:200]
+    return {
+        "source": str(p),
+        "updated_at": _mtime_iso(p),
+        "signals": items[: max(0, int(limit))],
+    }
 
 
-async def _load_intraday_fills_best_effort() -> Tuple[Optional[str], List[Dict[str, Any]]]:
+def _latest_intraday_day(sim_logs: Path) -> Optional[str]:
     """
-    Best-effort fills extraction:
-      1) Try sim_logs last-day logs (already used in intraday_logs_router)
-      2) Crawl the JSON and collect trade-like dicts
+    sim_logs contains files like YYYY-MM-DD_botname.json
     """
-    raw: List[Dict[str, Any]] = []
-
     try:
-        import backend.routers.intraday_logs_router as dt_logs  # module import (NOT from backend.routers import ...)
-
-        # if this exists, it returns {"date":..., "bots":{...}}
-        last_day_logs = await dt_logs.get_last_day_logs()
-        if isinstance(last_day_logs, dict):
-            _walk_collect_trade_like(last_day_logs, raw)
+        days = set()
+        for f in sim_logs.glob("*.json"):
+            nm = f.name
+            parts = nm.split("_")
+            if len(parts) >= 2 and len(parts[0]) == 10:
+                days.add(parts[0])
+        return sorted(days)[-1] if days else None
     except Exception:
-        pass
+        return None
 
-    fills = _normalize_fills(raw, limit=100)
 
-    # timestamp: best effort from the newest sim_logs file
-    ml_data_dt = Path(PATHS.get("ml_data_dt", "ml_data_dt"))
-    sim_log_dir = ml_data_dt / "sim_logs"
-    newest = None
-    newest_m = 0.0
-    try:
-        if sim_log_dir.exists():
-            for p in sim_log_dir.glob("*.json"):
-                mt = p.stat().st_mtime
-                if mt > newest_m:
-                    newest_m = mt
-                    newest = p
-    except Exception:
-        newest = None
+def _extract_fill_like_rows(payload: Any) -> List[Dict[str, Any]]:
+    """
+    Best-effort extraction from unknown shapes.
+    Accepts list/dict and tries to find 'fills'/'trades'/'orders' arrays.
+    """
+    if payload is None:
+        return []
 
-    updated_at = None
-    if newest_m > 0:
-        try:
-            updated_at = datetime.fromtimestamp(newest_m, tz=TIMEZONE).isoformat()
-        except Exception:
-            updated_at = None
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
 
-    return updated_at, fills
+    if isinstance(payload, dict):
+        for k in ("fills", "trades", "orders", "executions", "items"):
+            v = payload.get(k)
+            if isinstance(v, list):
+                return [x for x in v if isinstance(x, dict)]
+    return []
 
+
+def _load_intraday_fills_best_effort(limit: int = 50) -> Dict[str, Any]:
+    """
+    Try common places:
+      - ml_data_dt/sim_logs (derive from per-bot logs)
+      - ml_data_dt/*fills*.json (if you later add one)
+    """
+    ml_data_dt, _ = _paths_dt()
+
+    sim_logs = ml_data_dt / "sim_logs"
+    candidates = [
+        ml_data_dt / "paper_fills.json",
+        ml_data_dt / "broker_fills.json",
+        ml_data_dt / "fills.json",
+        ml_data_dt / "paper_trades.json",
+    ]
+
+    fills: List[Dict[str, Any]] = []
+    src: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    p = _first_existing(candidates)
+    if p:
+        js = _read_json(p)
+        fills = _extract_fill_like_rows(js)
+        src = str(p)
+        updated_at = _mtime_iso(p)
+
+    # fallback: derive from sim_logs latest day
+    if not fills and sim_logs.exists():
+        day = _latest_intraday_day(sim_logs)
+        if day:
+            rows: List[Dict[str, Any]] = []
+            latest_m = 0.0
+            for f in sim_logs.glob(f"{day}_*.json"):
+                js = _read_json(f)
+                rows.extend(_extract_fill_like_rows(js))
+                try:
+                    latest_m = max(latest_m, f.stat().st_mtime)
+                except Exception:
+                    pass
+
+            # crude normalization: keep only rows that look trade-ish
+            cleaned = []
+            for r in rows:
+                sym = r.get("symbol") or r.get("sym") or r.get("ticker")
+                side = r.get("side") or r.get("action") or r.get("intent")
+                if sym or side:
+                    cleaned.append(r)
+
+            fills = cleaned
+            src = str(sim_logs)
+            if latest_m > 0:
+                updated_at = datetime.fromtimestamp(latest_m, tz=TIMEZONE).isoformat()
+
+    return {
+        "source": src,
+        "updated_at": updated_at,
+        "fills": fills[: max(0, int(limit))],
+    }
+
+
+# -------------------------
+# Main bundle endpoint(s)
+# -------------------------
 
 @router.get("/page")
 async def bots_page_bundle() -> Dict[str, Any]:
     """
-    One payload for the Bots page.
-    Mount with prefixes so the frontend can hit either:
-      /api/bots/page
-      /api/backend/bots/page
+    Single payload that contains everything the Bots page needs.
+    Best-effort: sub-call failures become error objects instead of 500'ing the whole response.
     """
     out: Dict[str, Any] = {
         "as_of": datetime.now(TIMEZONE).isoformat(),
@@ -257,80 +262,68 @@ async def bots_page_bundle() -> Dict[str, Any]:
         "intraday": {},
     }
 
-    # ---- Swing (EOD) ----
+    # --- Swing / EOD ---
     try:
-        import backend.routers.eod_bots_router as eod  # module import
-
+        eod = _import_module("backend.routers.eod_bots_router")
         try:
-            out["swing"]["status"] = await eod.eod_status()
+            out["swing"]["status"] = await _call(eod, "eod_status")
         except Exception as e:
             out["swing"]["status"] = _err(e)
 
         try:
-            out["swing"]["configs"] = await eod.list_eod_bot_configs()
+            out["swing"]["configs"] = await _call(eod, "list_eod_bot_configs")
         except Exception as e:
             out["swing"]["configs"] = _err(e)
 
         try:
-            out["swing"]["log_days"] = await eod.eod_log_days()
+            out["swing"]["log_days"] = await _call(eod, "eod_log_days")
         except Exception as e:
             out["swing"]["log_days"] = _err(e)
-
     except Exception as e:
         out["swing"] = _err(e)
 
-    # ---- Intraday ----
+    # --- Intraday ---
     try:
-        import backend.routers.intraday_logs_router as dt  # module import
-
+        dt = _import_module("backend.routers.intraday_logs_router")
         try:
-            out["intraday"]["status"] = await dt.intraday_status()
+            out["intraday"]["status"] = await _call(dt, "intraday_status")
         except Exception as e:
             out["intraday"]["status"] = _err(e)
 
         try:
-            out["intraday"]["configs"] = await dt.intraday_configs()
+            out["intraday"]["configs"] = await _call(dt, "intraday_configs")
         except Exception as e:
             out["intraday"]["configs"] = _err(e)
 
         try:
-            out["intraday"]["log_days"] = await dt.list_log_days()
+            out["intraday"]["log_days"] = await _call(dt, "list_log_days")
         except Exception as e:
             out["intraday"]["log_days"] = _err(e)
 
+        # Optional PnL summary (from sim_summary.json)
         try:
-            out["intraday"]["pnl_last_day"] = await dt.get_last_day_pnl_summary()
+            out["intraday"]["pnl_last_day"] = await _call(dt, "get_last_day_pnl_summary")
         except Exception as e:
             out["intraday"]["pnl_last_day"] = _err(e)
-
-        # tape: signals + fills (artifact based)
-        sig_updated, sigs = _load_intraday_signals()
-        fill_updated, fills = await _load_intraday_fills_best_effort()
-
-        out["intraday"]["tape"] = {
-            "updated_at": sig_updated or fill_updated,
-            "signals": sigs,
-            "fills": fills,
-        }
 
     except Exception as e:
         out["intraday"] = _err(e)
 
+    # --- Best-effort “live-ish” artifacts ---
+    try:
+        out["intraday"]["signals_latest"] = _load_intraday_signals_best_effort(limit=50)
+    except Exception as e:
+        out["intraday"]["signals_latest"] = _err(e)
+
+    try:
+        out["intraday"]["fills_recent"] = _load_intraday_fills_best_effort(limit=50)
+    except Exception as e:
+        out["intraday"]["fills_recent"] = _err(e)
+
     return out
 
 
-@router.get("/tape")
-async def bots_tape() -> Dict[str, Any]:
-    """
-    Just the tape, if you want to poll it separately:
-      /api/bots/tape
-      /api/backend/bots/tape
-    """
-    sig_updated, sigs = _load_intraday_signals()
-    fill_updated, fills = await _load_intraday_fills_best_effort()
-    return {
-        "as_of": datetime.now(TIMEZONE).isoformat(),
-        "updated_at": sig_updated or fill_updated,
-        "signals": sigs,
-        "fills": fills,
-    }
+@router.get("/overview")
+async def bots_overview() -> Dict[str, Any]:
+    # alias for convenience
+    return await bots_page_bundle()
