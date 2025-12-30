@@ -1,5 +1,18 @@
-# dt_backend/ml/ai_model_intraday.py
-"""Runtime intraday model loader + scorer (LightGBM + optional deep ensemble)."""
+"""Runtime intraday model loader + scorer (LightGBM + optional deep ensemble).
+
+Patch: robust feature coercion
+------------------------------
+Fixes crashes like:
+    could not convert string to float: '2025-12-30T16:18:16Z'
+
+Root cause:
+  • training coerces datetime/categorical/object features to numeric
+  • runtime was passing raw strings into LightGBM predict()
+
+This version coerces features in scoring to match training behavior as closely
+as possible (datetime -> int64 ns; common categoricals -> stable codes; other
+objects -> numeric-or-factorize fallback).
+"""
 from __future__ import annotations
 
 import json
@@ -40,23 +53,140 @@ class LoadedModels:
     ensemble_cfg: EnsembleConfig
 
 
+# -------------------------------
+# Feature coercion (runtime)
+# -------------------------------
+
+# These come from ml_data_builder_intraday.py defaults; training used factorize(sort=True),
+# so we mirror that stable code mapping to minimize train/serve skew.
+_TREND_CODES = {
+    "down": 0,
+    "flat": 1,
+    "strong_down": 2,
+    "strong_up": 3,
+    "up": 4,
+}
+_VOL_BUCKET_CODES = {
+    "high": 0,
+    "low": 1,
+    "mid": 2,
+}
+
+def _coerce_features_runtime(X: pd.DataFrame) -> pd.DataFrame:
+    """Coerce mixed feature frame into numeric types safe for LightGBM predict()."""
+    X2 = pd.DataFrame(index=X.index)
+
+    for c in X.columns:
+        s = X[c]
+
+        # Handle known categoricals with stable codes
+        if c == "intraday_trend":
+            ss = s.astype("string").str.lower()
+            X2[c] = ss.map(_TREND_CODES).fillna(-1).astype(np.int32)
+            continue
+        if c == "vol_bucket":
+            ss = s.astype("string").str.lower()
+            X2[c] = ss.map(_VOL_BUCKET_CODES).fillna(-1).astype(np.int32)
+            continue
+
+        # datetimes
+        if pd.api.types.is_datetime64_any_dtype(s) or pd.api.types.is_datetime64tz_dtype(s):
+            try:
+                if pd.api.types.is_datetime64tz_dtype(s):
+                    s = s.dt.tz_convert("UTC").dt.tz_localize(None)
+                X2[c] = s.astype("int64").fillna(0).astype(np.int64)
+            except Exception:
+                X2[c] = 0
+            continue
+
+        # bools
+        if pd.api.types.is_bool_dtype(s):
+            X2[c] = s.fillna(False).astype(np.int8)
+            continue
+
+        # numerics
+        if pd.api.types.is_numeric_dtype(s):
+            X2[c] = pd.to_numeric(s, errors="coerce").fillna(0.0).astype(np.float32)
+            continue
+
+        # object / strings: try datetime -> numeric -> factorize
+        try:
+            # datetime-ish strings (e.g. 2025-12-30T16:18:16Z)
+            dt = pd.to_datetime(s, errors="coerce", utc=True)
+            if dt.notna().any():
+                # Convert to UTC-naive ns (matches training coercion style)
+                dt2 = dt.dt.tz_convert("UTC").dt.tz_localize(None)
+                ns = dt2.astype("int64")
+                ns = ns.where(dt.notna(), 0)
+                X2[c] = ns.astype(np.int64)
+                continue
+        except Exception:
+            pass
+
+        try:
+            num = pd.to_numeric(s, errors="coerce")
+            if num.notna().any():
+                X2[c] = num.fillna(0.0).astype(np.float32)
+                continue
+        except Exception:
+            pass
+
+        try:
+            # Last resort: factorize for any remaining objects (matches training approach)
+            codes, _ = pd.factorize(s.astype("string"), sort=True)
+            X2[c] = pd.Series(codes, index=X.index).astype(np.int32)
+        except Exception:
+            X2[c] = 0.0
+
+    return X2
+
+
 # ----- LightGBM loader -----
+
+def _safe_load_booster(model_path: Path) -> Optional[lgb.Booster]:
+    try:
+        if model_path.stat().st_size < 64:
+            log(f"[ai_model_intraday] ⚠️ model file too small ({model_path.stat().st_size} bytes): {model_path}")
+            return None
+    except Exception:
+        pass
+    try:
+        return lgb.Booster(model_file=str(model_path))
+    except Exception as e:
+        log(f"[ai_model_intraday] ⚠️ failed to load LightGBM model at {model_path}: {e}")
+        return None
+
 
 def _load_lgbm() -> Tuple[Optional[lgb.Booster], Optional[list[str]]]:
     model_dir = get_model_dir("lightgbm_intraday")  # canonical intraday artifact folder
     model_path = model_dir / "model.txt"
+    bak_path = model_dir / "model.txt.bak"
     fmap_path = model_dir / "feature_map.json"
 
-    if not model_path.exists():
+    if not model_path.exists() and not bak_path.exists():
         log(f"[ai_model_intraday] ⚠️ LightGBM model not found at {model_path}")
         return None, None
 
-    booster = lgb.Booster(model_file=str(model_path))
+    booster = None
+    if model_path.exists():
+        booster = _safe_load_booster(model_path)
+
+    # Fallback to backup if primary is corrupt/unloadable
+    if booster is None and bak_path.exists():
+        log("[ai_model_intraday] ⚠️ Falling back to model.txt.bak")
+        booster = _safe_load_booster(bak_path)
+
+    if booster is None:
+        return None, None
+
     features: Optional[list[str]] = None
-    if fmap_path.exists():
-        with fmap_path.open("r", encoding="utf-8") as f:
-            features = json.load(f)
-    else:
+    try:
+        if fmap_path.exists():
+            with fmap_path.open("r", encoding="utf-8") as f:
+                features = json.load(f)
+        else:
+            features = booster.feature_name()
+    except Exception:
         features = booster.feature_name()
 
     log("[ai_model_intraday] ✅ Loaded LightGBM intraday model.")
@@ -130,14 +260,18 @@ def _predict_lgbm_proba(
     X: pd.DataFrame,
     feature_names: Optional[list[str]] = None,
 ) -> np.ndarray:
-    X_local = X.copy()
+    # Coerce to numeric first (fixes string timestamp crashes)
+    X_local = _coerce_features_runtime(X)
+
     if feature_names is not None:
         missing = [c for c in feature_names if c not in X_local.columns]
         if missing:
             for c in missing:
                 X_local[c] = 0.0
         X_local = X_local[feature_names]
-    raw = booster.predict(X_local.values)
+
+    # LightGBM happily consumes numeric DataFrame; keep as DataFrame to preserve dtypes.
+    raw = booster.predict(X_local)
     return np.asarray(raw, dtype=float)
 
 
@@ -203,11 +337,15 @@ def score_intraday_batch(
 
 
 if __name__ == "__main__":
-    # Tiny smoke test with random features
+    # Tiny smoke test with random-ish features, including string timestamps
     n = 5
     dummy = pd.DataFrame({f"f{i}": np.random.randn(n) for i in range(10)})
+    dummy["ts"] = ["2025-12-30T16:18:16Z"] * n
+    dummy["intraday_trend"] = ["flat", "up", "down", "strong_up", "strong_down"]
+    dummy["vol_bucket"] = ["low", "mid", "high", "low", "mid"]
     try:
         proba_df, labels = score_intraday_batch(dummy)
         log(f"[ai_model_intraday] Demo OK — got {len(proba_df)} rows.")
+        print(labels.head())
     except Exception as e:
         log(f"[ai_model_intraday] Demo failed: {e}")
