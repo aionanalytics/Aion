@@ -46,9 +46,10 @@ LOCK_FILE = PATHS["nightly_lock"]
 SUMMARY_FILE = PATHS["logs"] / "nightly" / "last_nightly_summary.json"
 
 # -----------------------------
-# Recent-run guard (NEW)
+# Recent-run guard
 # -----------------------------
-MIN_HOURS_BETWEEN_RUNS = 0
+# Default: skip if the last run finished within N hours. Override with AION_MIN_HOURS_BETWEEN_NIGHTLY=0 to disable.
+MIN_HOURS_BETWEEN_RUNS = int(os.getenv("AION_MIN_HOURS_BETWEEN_NIGHTLY", "8") or "8")
 
 
 def _recent_nightly_ran_within(hours: int) -> bool:
@@ -529,11 +530,255 @@ def run_nightly_job(
         except Exception as e:
             _record_err(summary, key, e, t0)
 
-        # (rest of file omitted in snippet)
-        # ... keep unchanged ...
+        
+        # 10) Predictions
+        key, title = PIPELINE[9]
+        _phase(title, 10, TOTAL_PHASES)
+        t0 = time.time()
+        try:
+            _require(predict_all, "backend.core.ai_model.core_training.predict_all")
+            prediction_run_ts = datetime.now(TIMEZONE).isoformat()
+
+            preds_by_symbol = predict_all(rolling, write_diagnostics=False) or {}
+            if not isinstance(preds_by_symbol, dict):
+                raise RuntimeError("predict_all returned non-dict (unexpected).")
+
+            preds_total = int(len(preds_by_symbol))
+            if preds_total <= 0:
+                raise RuntimeError("preds_total==0 (predict_all returned empty).")
+
+            # Merge into rolling (keep existing node fields intact)
+            updated_syms = 0
+            for sym, node in list(rolling.items()):
+                if str(sym).startswith("_") or not isinstance(node, dict):
+                    continue
+                su = str(sym).upper()
+                if su in preds_by_symbol:
+                    node["predictions"] = preds_by_symbol[su]
+                    node["predictions_ts"] = prediction_run_ts
+                    rolling[sym] = node
+                    updated_syms += 1
+
+            # Persist rolling
+            try:
+                save_rolling(rolling)
+            except Exception as e_save:
+                log(f"[nightly_job] ⚠️ save_rolling after predict_all failed (continuing): {e_save}")
+
+            # Update rolling_nervous predictions history (best-effort)
+            try:
+                nervous = _read_rolling_nervous() or {}
+                nervous2 = _append_predictions_history(nervous, preds_by_symbol, prediction_run_ts, keep_days=30)
+                save_rolling_nervous(nervous2)
+            except Exception as e_hist:
+                log(f"[nightly_job] ⚠️ predictions_history update failed (continuing): {e_hist}")
+
+            # Fail-loud: ensure at least one horizon looks valid
+            valid_horizons = set()
+            for _sym, pred in preds_by_symbol.items():
+                if not isinstance(pred, dict):
+                    continue
+                for h, blk in pred.items():
+                    if not isinstance(blk, dict):
+                        continue
+                    if bool(blk.get("valid", True)):
+                        valid_horizons.add(str(h))
+            if not valid_horizons:
+                raise RuntimeError("No valid horizons found in predictions output.")
+
+            payload = {
+                "preds_total": preds_total,
+                "rolling_updated": int(updated_syms),
+                "valid_horizons": sorted(valid_horizons),
+                "run_ts": prediction_run_ts,
+            }
+            _record_ok(summary, key, payload, t0)
+            _write_summary(summary)
+            log(f"✅ Predictions complete — symbols={preds_total} horizons={len(valid_horizons)}")
+        except Exception as e:
+            _record_err(summary, key, e, t0)
+            _write_summary(summary)
+            raise
+
+        # 11) Prediction logger (UI feed + ledger)
+        key, title = PIPELINE[10]
+        _phase(title, 11, TOTAL_PHASES)
+        t0 = time.time()
+        try:
+            _require(log_predictions, "backend.services.prediction_logger.log_predictions")
+
+            res = log_predictions(
+                as_of_date=as_of_date,
+                save_to_file=True,
+                append_ledger=True,
+                apply_policy_first=False,  # policy happens later (brain-aligned)
+                write_timestamped=True,
+                run_ts_override=prediction_run_ts,
+                entry_date_override=as_of_date,
+            )
+            _record_ok(summary, key, res, t0)
+            _write_summary(summary)
+            log("✅ Prediction logging complete.")
+        except Exception as e:
+            _record_err(summary, key, e, t0)
+            _write_summary(summary)
+
+        # 12) Accuracy engine (calibration + windows)
+        key, title = PIPELINE[11]
+        _phase(title, 12, TOTAL_PHASES)
+        t0 = time.time()
+        try:
+            _require(compute_accuracy, "backend.services.accuracy_engine.compute_accuracy")
+            res = compute_accuracy()
+            _record_ok(summary, key, res, t0)
+            _write_summary(summary)
+            log("✅ Accuracy engine complete.")
+        except Exception as e:
+            _record_err(summary, key, e, t0)
+            _write_summary(summary)
+
+        # 13) Context state
+        key, title = PIPELINE[12]
+        _phase(title, 13, TOTAL_PHASES)
+        t0 = time.time()
+        try:
+            _require(build_context, "backend.core.context_state.build_context")
+            res = build_context()
+            _record_ok(summary, key, res, t0)
+            _write_summary(summary)
+            log("✅ Context state complete.")
+        except Exception as e:
+            _record_err(summary, key, e, t0)
+            _write_summary(summary)
+
+        # 14) Regime detection
+        key, title = PIPELINE[13]
+        _phase(title, 14, TOTAL_PHASES)
+        t0 = time.time()
+        try:
+            _require(detect_regime, "backend.core.regime_detector.detect_regime")
+            res = detect_regime(None)
+            _record_ok(summary, key, res, t0)
+            _write_summary(summary)
+            log("✅ Regime detection complete.")
+        except Exception as e:
+            _record_err(summary, key, e, t0)
+            _write_summary(summary)
+
+        # 15) Continuous learning (drift + memory)
+        key, title = PIPELINE[14]
+        _phase(title, 15, TOTAL_PHASES)
+        t0 = time.time()
+        try:
+            _require(run_continuous_learning, "backend.core.continuous_learning.run_continuous_learning")
+            res = run_continuous_learning()
+            _record_ok(summary, key, res, t0)
+            _write_summary(summary)
+            log("✅ Continuous learning complete.")
+        except Exception as e:
+            _record_err(summary, key, e, t0)
+            _write_summary(summary)
+
+        # 16) Performance aggregation (system metrics)
+        key, title = PIPELINE[15]
+        _phase(title, 16, TOTAL_PHASES)
+        t0 = time.time()
+        try:
+            if aggregate_system_performance is None:
+                res = {"status": "skipped", "reason": "import_failed"}
+            else:
+                res = aggregate_system_performance(lookback_days=14)
+            _record_ok(summary, key, res, t0)
+            _write_summary(summary)
+            log("✅ Performance aggregation complete.")
+        except Exception as e:
+            _record_err(summary, key, e, t0)
+            _write_summary(summary)
+
+        # 17) AION brain update (behavioral memory)
+        key, title = PIPELINE[16]
+        _phase(title, 17, TOTAL_PHASES)
+        t0 = time.time()
+        try:
+            if update_aion_brain is None:
+                res = {"status": "skipped", "reason": "import_failed"}
+            else:
+                res = update_aion_brain()
+            _record_ok(summary, key, res, t0)
+            _write_summary(summary)
+            log("✅ AION brain update complete.")
+        except Exception as e:
+            _record_err(summary, key, e, t0)
+            _write_summary(summary)
+
+        # 18) Policy engine (brain-aligned)
+        key, title = PIPELINE[17]
+        _phase(title, 18, TOTAL_PHASES)
+        t0 = time.time()
+        try:
+            _require(apply_policy, "backend.core.policy_engine.apply_policy")
+            apply_policy()
+            _record_ok(summary, key, {"status": "ok"}, t0)
+            _write_summary(summary)
+            log("✅ Policy engine complete.")
+        except Exception as e:
+            _record_err(summary, key, e, t0)
+            _write_summary(summary)
+
+        # Post-policy UI refresh (latest_predictions.json) — do NOT append ledger twice
+        try:
+            if log_predictions is not None:
+                log("[nightly_job] 🔄 UI refresh after policy (append_ledger=False)")
+                log_predictions(
+                    as_of_date=as_of_date,
+                    save_to_file=True,
+                    append_ledger=False,
+                    apply_policy_first=False,
+                    write_timestamped=False,
+                    run_ts_override=prediction_run_ts,
+                    entry_date_override=as_of_date,
+                )
+        except Exception as e_refresh:
+            log(f"[nightly_job] ⚠️ post-policy UI refresh failed (continuing): {e_refresh}")
+
+        # 19) Insights builder
+        key, title = PIPELINE[18]
+        _phase(title, 19, TOTAL_PHASES)
+        t0 = time.time()
+        try:
+            _require(build_daily_insights, "backend.services.insights_builder.build_daily_insights")
+            res = build_daily_insights(limit=50)
+            _record_ok(summary, key, res, t0)
+            _write_summary(summary)
+            log("✅ Insights complete.")
+        except Exception as e:
+            _record_err(summary, key, e, t0)
+            _write_summary(summary)
+
+        # 20) Supervisor agent
+        key, title = PIPELINE[19]
+        _phase(title, 20, TOTAL_PHASES)
+        t0 = time.time()
+        try:
+            _require(run_supervisor_agent, "backend.core.supervisor_agent.run_supervisor_agent")
+            res = run_supervisor_agent()
+            _record_ok(summary, key, res, t0)
+            _write_summary(summary)
+            log("✅ Supervisor complete.")
+        except Exception as e:
+            _record_err(summary, key, e, t0)
+            _write_summary(summary)
+
+        # Determine final status
+        had_errors = any(
+            isinstance(v, dict) and str(v.get("status")) == "error"
+            for v in (summary.get("phases") or {}).values()
+        )
+        summary["status"] = "ok" if not had_errors else "ok_with_errors"
 
         summary["finished_at"] = datetime.now(TIMEZONE).isoformat()
-        summary["status"] = "ok"
+        if summary.get("status") == "running":
+            summary["status"] = "ok"
         _write_summary(summary)
         return summary
 
