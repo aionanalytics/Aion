@@ -35,3 +35,4 @@ backend/.env
 dt_backend/rolling/
 tools/
 dt_backend/signals/
+dt_backend/models/
