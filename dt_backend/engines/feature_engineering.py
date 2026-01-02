@@ -92,12 +92,37 @@ def _session_bounds_utc(now_utc: datetime) -> Tuple[datetime, datetime]:
     return open_ny.astimezone(timezone.utc), close_ny.astimezone(timezone.utc)
 
 
+def _market_open_utc_for(ts_utc: datetime) -> datetime:
+    """Compute the NYSE market open (09:30 NY time) for the date of `ts_utc`, returned in UTC.
+
+    Defensive:
+      - If ts_utc is naive, assume UTC.
+      - If ZoneInfo isn't available, falls back to "today at 09:30 UTC" (not perfect, but safe).
+    """
+    try:
+        if ts_utc.tzinfo is None:
+            ts_utc = ts_utc.replace(tzinfo=timezone.utc)
+        else:
+            ts_utc = ts_utc.astimezone(timezone.utc)
+
+        ny = _ny_tz()
+        ny_dt = ts_utc.astimezone(ny)
+        open_ny = ny_dt.replace(hour=9, minute=30, second=0, microsecond=0)
+        return open_ny.astimezone(timezone.utc)
+    except Exception:
+        # ultra-safe fallback: do not crash feature loop
+        base = datetime.now(timezone.utc)
+        return base.replace(hour=9, minute=30, second=0, microsecond=0)
+
+
 def _extract_bars(node: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
     bars = node.get(key) or []
     return bars if isinstance(bars, list) else []
 
 
-def _ohlcv_from_bars(bars: List[Dict[str, Any]]) -> Tuple[List[float], List[float], List[float], List[float], List[float], List[float], List[datetime]]:
+def _ohlcv_from_bars(
+    bars: List[Dict[str, Any]]
+) -> Tuple[List[float], List[float], List[float], List[float], List[float], List[float], List[datetime]]:
     o: List[float] = []
     h: List[float] = []
     l: List[float] = []
@@ -253,7 +278,15 @@ def _market_proxy_features(rolling: Dict[str, Any], proxies: List[str], tf_key: 
     return out
 
 
-def _feature_snapshot_for_symbol(sym: str, node: Dict[str, Any], *, rolling: Dict[str, Any], tf_key: str, mkt: Dict[str, float], now_utc: datetime) -> Dict[str, Any]:
+def _feature_snapshot_for_symbol(
+    sym: str,
+    node: Dict[str, Any],
+    *,
+    rolling: Dict[str, Any],
+    tf_key: str,
+    mkt: Dict[str, float],
+    now_utc: datetime
+) -> Dict[str, Any]:
     primary_key = "bars_intraday_5m" if tf_key == "5Min" else "bars_intraday"
     fallback_key = "bars_intraday" if primary_key == "bars_intraday_5m" else "bars_intraday_5m"
 
@@ -290,6 +323,21 @@ def _feature_snapshot_for_symbol(sym: str, node: Dict[str, Any], *, rolling: Dic
     use_ts = ts1 if len(ts1) >= 30 else ts
     use_h = h1 if len(h1) >= 30 else h
     use_l = l1 if len(l1) >= 30 else l
+
+    # ✅ FIX: ensure open_utc ALWAYS exists (prevents dt_scheduler crash loop)
+    base_ts = None
+    if use_ts and isinstance(use_ts[0], datetime):
+        base_ts = use_ts[0]
+    else:
+        base_ts = now_utc
+
+    if base_ts.tzinfo is None:
+        base_ts = base_ts.replace(tzinfo=timezone.utc)
+    else:
+        base_ts = base_ts.astimezone(timezone.utc)
+
+    open_utc = _market_open_utc_for(base_ts)
+
     or5_h, or5_l = _opening_range(use_ts, use_h, use_l, 5, open_utc=open_utc)
     or15_h, or15_l = _opening_range(use_ts, use_h, use_l, 15, open_utc=open_utc)
 
@@ -313,7 +361,7 @@ def _feature_snapshot_for_symbol(sym: str, node: Dict[str, Any], *, rolling: Dic
     open_price = c[0]
 
     feat: Dict[str, Any] = {
-        "ts": now_utc.isoformat(timespec="seconds").replace("+00:00","Z"),
+        "ts": now_utc.isoformat(timespec="seconds").replace("+00:00", "Z"),
         "tf": used_tf,
         "last_price": float(last_price),
         "pct_chg_from_open": float(pct_change(last_price, open_price)),
@@ -372,7 +420,12 @@ def _feature_snapshot_for_symbol(sym: str, node: Dict[str, Any], *, rolling: Dic
     return feat
 
 
-def build_intraday_features(max_symbols: int | None = None, *, now_utc: datetime | None = None, ignore_min_interval: bool = False) -> Dict[str, Any]:
+def build_intraday_features(
+    max_symbols: int | None = None,
+    *,
+    now_utc: datetime | None = None,
+    ignore_min_interval: bool = False
+) -> Dict[str, Any]:
     """Compute features_dt for each symbol in rolling."""
     rolling = _read_rolling() or {}
     if not isinstance(rolling, dict) or not rolling:
