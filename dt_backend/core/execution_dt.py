@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, Optional
 
 from .data_pipeline_dt import _read_rolling, save_rolling, ensure_symbol_node, log
 
@@ -83,6 +83,7 @@ def _trend_and_vol(context_dt: Dict[str, Any]) -> Tuple[str, str]:
 
 
 def _size_from_conf_and_vol(conf: float, vol_bkt: str, cfg: ExecConfig) -> float:
+    """Legacy sizing (kept for compatibility / future fallback)."""
     if conf <= 0.0:
         return 0.0
 
@@ -109,8 +110,7 @@ def _size_from_phit_expected_r(
     """Phase 7 sizing: size ~ f(P(hit), expected_R) with vol scaling.
 
     * expected_r is reward-to-risk multiple (e.g., 1.0 = 1R target).
-    * This is intentionally conservative; we only allocate when phit is above
-      coin-flip + margin.
+    * Conservative: allocate only if phit is above coin-flip + margin.
     """
     phit = _safe_float(phit, 0.0)
     if phit < cfg.min_phit:
@@ -140,7 +140,8 @@ def _expected_r_from_plan(node: Dict[str, Any]) -> float:
     try:
         plan = node.get("execution_plan_dt") if isinstance(node.get("execution_plan_dt"), dict) else {}
         risk = plan.get("risk") if isinstance(plan, dict) and isinstance(plan.get("risk"), dict) else {}
-        # prefer explicit r_target if provided by the strategy
+
+        # Prefer explicit r_target if provided by the strategy
         rt = risk.get("r_target")
         if rt is not None:
             return max(0.1, min(3.0, _safe_float(rt, 1.0)))
@@ -151,29 +152,42 @@ def _expected_r_from_plan(node: Dict[str, Any]) -> float:
         tp = _safe_float(risk.get("take_profit"), 0.0)
         if last_px <= 0 or stop <= 0 or tp <= 0:
             return 1.0
+
         rr = abs(tp - last_px) / max(1e-9, abs(last_px - stop))
         return max(0.1, min(3.0, float(rr)))
     except Exception:
         return 1.0
 
 
-def _parse_iso_ts(ts: str | None) -> datetime | None:
+def _parse_iso_ts(ts: Any) -> Optional[datetime]:
     if not ts:
         return None
     try:
-        if ts.endswith("Z"):
-            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        return datetime.fromisoformat(ts)
+        s = str(ts).strip()
+        if s.endswith("Z"):
+            s = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     except Exception:
         return None
 
 
-def _cooldown_active(prev_exec: Dict[str, Any], new_side: str, cfg: ExecConfig, now: datetime | None = None) -> bool:
+def _cooldown_active(
+    prev_exec: Dict[str, Any],
+    new_side: str,
+    cfg: ExecConfig,
+    *,
+    now_utc: Optional[datetime] = None,
+) -> bool:
     """Return True if we are within cooldown window from a conflicting action."""
     if not prev_exec:
         return False
 
     prev_side = str(prev_exec.get("side") or "").upper()
+    new_side = str(new_side or "").upper()
+
     if prev_side not in {"BUY", "SELL"} or new_side not in {"BUY", "SELL"}:
         return False
 
@@ -185,8 +199,8 @@ def _cooldown_active(prev_exec: Dict[str, Any], new_side: str, cfg: ExecConfig, 
     if ts is None:
         return False
 
-    now = now_utc or datetime.now(timezone.utc)
-    delta = now - ts
+    now_utc = now_utc or datetime.now(timezone.utc)
+    delta = now_utc - ts
     return delta.total_seconds() < cfg.cooldown_minutes * 60
 
 
@@ -206,9 +220,12 @@ def run_execution_intraday(
     """
     cfg = cfg or ExecConfig()
     rolling = rolling_override if isinstance(rolling_override, dict) else _read_rolling()
-    if not rolling:
+    if not rolling or not isinstance(rolling, dict):
         log("[exec_dt] ⚠️ rolling empty, nothing to do.")
         return {"symbols": 0, "updated": 0}
+
+    # ✅ FIX: ensure time exists and is UTC
+    now_utc = now_utc or datetime.now(timezone.utc)
 
     # Phase 4: risk mode can modestly scale sizing (keeps a single code path).
     try:
@@ -224,12 +241,16 @@ def run_execution_intraday(
     except Exception:
         pass
 
-    now = now or datetime.now(timezone.utc)
     updated = 0
+    symbols_seen = 0
 
     for sym, node_raw in list(rolling.items()):
-        if sym.startswith("_"):
+        if not isinstance(sym, str) or sym.startswith("_"):
             continue
+        if not isinstance(node_raw, dict):
+            continue
+
+        symbols_seen += 1
 
         node = ensure_symbol_node(rolling, sym)
         policy = node.get(policy_key) or {}
@@ -255,56 +276,47 @@ def run_execution_intraday(
             except Exception:
                 node["_execution_plan_used"] = False
 
-        intent = str(policy.get("intent") or "").upper()
-        conf = _safe_float(policy.get("confidence"), 0.0)
-        # Phase 7: calibrated probability-of-hit (falls back to confidence)
-        phit = _safe_float(policy.get("p_hit"), conf)
+        intent = str((policy if isinstance(policy, dict) else {}).get("intent") or "").upper()
+        conf = _safe_float((policy if isinstance(policy, dict) else {}).get("confidence"), 0.0)
 
-        if intent not in {"BUY", "SELL"} or conf < cfg.min_conf:
-            side = "FLAT"
-            conf_adj = 0.0
-        else:
-            trend, vol_bkt = _trend_and_vol(ctx)
+        # Phase 7: calibrated probability-of-hit (falls back to confidence)
+        phit = _safe_float((policy if isinstance(policy, dict) else {}).get("p_hit"), conf)
+
+        side = "FLAT"
+        conf_adj = 0.0
+        size = 0.0
+
+        if intent in {"BUY", "SELL"} and conf >= cfg.min_conf:
+            _, vol_bkt = _trend_and_vol(ctx if isinstance(ctx, dict) else {})
             expected_r = _expected_r_from_plan(node)
             size = _size_from_phit_expected_r(phit, expected_r, vol_bkt, cfg)
 
-            # If size is effectively zero, treat as FLAT.
-            if size <= 0.0:
-                side = "FLAT"
-                conf_adj = 0.0
-            else:
+            if size > 0.0:
                 side = intent
                 # Phase 7: confidence_adj reflects *probability of hit* when available.
                 conf_adj = min(cfg.max_conf_cap, max(conf, phit))
 
         # Determine cooldown and adjust side/size accordingly.
-        prev_exec = node.get(out_key) or {}
-        cooldown = _cooldown_active(prev_exec, side, cfg, now=now)
+        prev_exec = node.get(out_key) if isinstance(node.get(out_key), dict) else {}
+        cooldown = _cooldown_active(prev_exec, side, cfg, now_utc=now_utc)
 
         if cooldown and side in {"BUY", "SELL"}:
             # Respect cooldown by downgrading to FLAT for this cycle.
             side = "FLAT"
-
-        # Compute final size if side is active; zero otherwise.
-        if side in {"BUY", "SELL"}:
-            trend, vol_bkt = _trend_and_vol(ctx)
-            expected_r = _expected_r_from_plan(node)
-            size = _size_from_phit_expected_r(phit, expected_r, vol_bkt, cfg)
-            conf_adj = min(cfg.max_conf_cap, max(conf, phit))
-        else:
             size = 0.0
+            conf_adj = 0.0
 
-        valid_until = (now + timedelta(minutes=cfg.valid_minutes)).isoformat()
+        valid_until = (now_utc + timedelta(minutes=cfg.valid_minutes)).isoformat().replace("+00:00", "Z")
 
         node[out_key] = {
             "side": side,
-            "size": float(size),
-            "confidence_adj": float(conf_adj),
+            "size": float(size) if side in {"BUY", "SELL"} else 0.0,
+            "confidence_adj": float(conf_adj) if side in {"BUY", "SELL"} else 0.0,
             "p_hit": float(phit) if side in {"BUY", "SELL"} else 0.0,
             "expected_r": float(_expected_r_from_plan(node)) if side in {"BUY", "SELL"} else 0.0,
             "cooldown": bool(cooldown),
             "valid_until": valid_until,
-            "ts": now.isoformat(),
+            "ts": now_utc.isoformat().replace("+00:00", "Z"),
             # Phase 3 metadata (ignored by Phase 0 executor, but logged/useful)
             "bot": (plan.get("bot") if isinstance(plan, dict) else None),
             "risk": (plan.get("risk") if isinstance(plan, dict) else None),
@@ -315,8 +327,9 @@ def run_execution_intraday(
 
     if save:
         save_rolling(rolling)
+
     log(f"[exec_dt] ✅ updated {out_key} for {updated} symbols.")
-    return {"symbols": len(rolling), "updated": updated}
+    return {"symbols": symbols_seen, "updated": updated}
 
 
 def main() -> None:

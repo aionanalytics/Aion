@@ -55,10 +55,6 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
 def _parse_iso_ts(s: Any) -> Optional[datetime]:
     if not s:
         return None
@@ -110,7 +106,6 @@ def _market_open_utc_for(ts_utc: datetime) -> datetime:
         open_ny = ny_dt.replace(hour=9, minute=30, second=0, microsecond=0)
         return open_ny.astimezone(timezone.utc)
     except Exception:
-        # ultra-safe fallback: do not crash feature loop
         base = datetime.now(timezone.utc)
         return base.replace(hour=9, minute=30, second=0, microsecond=0)
 
@@ -159,16 +154,26 @@ def _ohlcv_from_bars(
         c.append(cc)
         v.append(vv)
         vw.append(vww)
+
+    # ✅ Defensive: ensure increasing timestamps (feeds can be out-of-order)
+    if len(ts) >= 2:
+        idx = sorted(range(len(ts)), key=lambda i: ts[i])
+        ts = [ts[i] for i in idx]
+        o = [o[i] for i in idx]
+        h = [h[i] for i in idx]
+        l = [l[i] for i in idx]
+        c = [c[i] for i in idx]
+        v = [v[i] for i in idx]
+        vw = [vw[i] for i in idx]
+
     return o, h, l, c, v, vw, ts
 
 
 def _session_vwap_series(highs: List[float], lows: List[float], closes: List[float], volumes: List[float]) -> List[float]:
-    """Session VWAP series.
+    """Session VWAP series (cumulative).
 
     We compute cumulative VWAP using typical price (H+L+C)/3.
-    This is more useful than per-bar vwap for 'reversion to VWAP' logic.
     """
-
     n = min(len(highs), len(lows), len(closes), len(volumes))
     if n <= 0:
         return []
@@ -176,11 +181,11 @@ def _session_vwap_series(highs: List[float], lows: List[float], closes: List[flo
     cum_pv = 0.0
     cum_v = 0.0
     for i in range(n):
-        v = float(volumes[i] or 0.0)
+        vv = float(volumes[i] or 0.0)
         tp = (float(highs[i]) + float(lows[i]) + float(closes[i])) / 3.0
-        if v > 0:
-            cum_pv += tp * v
-            cum_v += v
+        if vv > 0:
+            cum_pv += tp * vv
+            cum_v += vv
         out.append((cum_pv / cum_v) if cum_v > 0 else tp)
     return out
 
@@ -211,10 +216,9 @@ def _trend_structure(closes: List[float], highs: List[float], lows: List[float])
     sma_20_prev = sma(closes[:-1], 20) if len(closes) > 21 else sma_20
     ma_slope = pct_change(sma_20, sma_20_prev)
 
-    # HH/HL heuristic over last 10 bars
     win = min(10, len(highs) - 1)
-    prior_high = max(highs[-(win + 1) : -1]) if win > 1 else highs[-2]
-    prior_low = min(lows[-(win + 1) : -1]) if win > 1 else lows[-2]
+    prior_high = max(highs[-(win + 1): -1]) if win > 1 else highs[-2]
+    prior_low = min(lows[-(win + 1): -1]) if win > 1 else lows[-2]
     hh = 1.0 if highs[-1] > prior_high else 0.0
     hl = 1.0 if lows[-1] > prior_low else 0.0
     trend_score = (1.0 if ma_slope > 0 else -1.0) * (0.5 + 0.25 * hh + 0.25 * hl)
@@ -227,12 +231,6 @@ def _trend_structure(closes: List[float], highs: List[float], lows: List[float])
 
 
 def _market_proxy_features(rolling: Dict[str, Any], proxies: List[str], tf_key: str) -> Dict[str, float]:
-    """Compute a small 'tape' snapshot from market proxy symbols.
-
-    Output keys are prefixed by proxy symbol (e.g. mkt_spy_*).
-    We also add a few aggregated keys (mkt_vol, mkt_trend).
-    """
-
     bars_key = "bars_intraday_5m" if tf_key == "5Min" else "bars_intraday"
 
     out: Dict[str, float] = {}
@@ -255,7 +253,12 @@ def _market_proxy_features(rolling: Dict[str, Any], proxies: List[str], tf_key: 
 
         prefix = f"mkt_{sym.lower()}_"
         out[prefix + "last"] = float(c[-1])
-        out[prefix + "vwap_dist"] = float(pct_change(c[-1], vwap_s[-1] if vwap_s else c[-1]))
+
+        if vwap_s:
+            out[prefix + "vwap_dist"] = float(pct_change(c[-1], vwap_s[-1]))
+        else:
+            out[prefix + "vwap_dist"] = 0.0
+
         out[prefix + "ma_slope"] = float(trend.get("ma_slope") or 0.0)
         out[prefix + "vol"] = float(realized_vol(rets))
         out[prefix + "ret_20"] = float(pct_change(c[-1], c[-21])) if len(c) >= 21 else 0.0
@@ -264,17 +267,8 @@ def _market_proxy_features(rolling: Dict[str, Any], proxies: List[str], tf_key: 
         vols.append(float(realized_vol(rets)))
         trends.append(float(trend.get("trend_score") or 0.0))
 
-    # Aggregates (helps bots treat proxies as a single market context)
-    if vols:
-        out["mkt_vol"] = float(sum(vols) / float(len(vols)))
-    else:
-        out["mkt_vol"] = 0.0
-
-    if trends:
-        out["mkt_trend"] = float(sum(trends) / float(len(trends)))
-    else:
-        out["mkt_trend"] = 0.0
-
+    out["mkt_vol"] = float(sum(vols) / float(len(vols))) if vols else 0.0
+    out["mkt_trend"] = float(sum(trends) / float(len(trends))) if trends else 0.0
     return out
 
 
@@ -307,13 +301,15 @@ def _feature_snapshot_for_symbol(
     rv = realized_vol(rets)
 
     vwap_s = _session_vwap_series(h, l, c, v)
+    if not vwap_s:
+        return {}  # ✅ no meaningful vwap -> no meaningful feature set
+
     vwap_last = vwap_s[-1]
     vwap_dist = pct_change(c[-1], vwap_last)
     vwap_slope = lin_slope(vwap_s, window=min(20, len(vwap_s)))
 
     a14 = atr(h, l, c, window=14)
 
-    # Opening range uses 1m bars if we have enough
     one_min_bars = _extract_bars(node, "bars_intraday")
     if one_min_bars:
         o1, h1, l1, c1, v1, vw1, ts1 = _ohlcv_from_bars(one_min_bars)
@@ -324,13 +320,7 @@ def _feature_snapshot_for_symbol(
     use_h = h1 if len(h1) >= 30 else h
     use_l = l1 if len(l1) >= 30 else l
 
-    # ✅ FIX: ensure open_utc ALWAYS exists (prevents dt_scheduler crash loop)
-    base_ts = None
-    if use_ts and isinstance(use_ts[0], datetime):
-        base_ts = use_ts[0]
-    else:
-        base_ts = now_utc
-
+    base_ts = use_ts[0] if use_ts else now_utc
     if base_ts.tzinfo is None:
         base_ts = base_ts.replace(tzinfo=timezone.utc)
     else:
@@ -366,16 +356,13 @@ def _feature_snapshot_for_symbol(
         "last_price": float(last_price),
         "pct_chg_from_open": float(pct_change(last_price, open_price)),
 
-        # VWAP
         "vwap": float(vwap_last),
         "vwap_dist": float(vwap_dist),
         "vwap_slope": float(vwap_slope),
 
-        # Vol/ATR
         "atr_14": float(a14),
         "realized_vol": float(rv),
 
-        # Opening range
         "or5_high": float(or5_h),
         "or5_low": float(or5_l),
         "or15_high": float(or15_h),
@@ -383,33 +370,27 @@ def _feature_snapshot_for_symbol(
         "or5_break": float(1.0 if (or5_h and last_price > or5_h) else (-1.0 if (or5_l and last_price < or5_l) else 0.0)),
         "or15_break": float(1.0 if (or15_h and last_price > or15_h) else (-1.0 if (or15_l and last_price < or15_l) else 0.0)),
 
-        # Trend structure
         "ma_slope": float(trend.get("ma_slope") or 0.0),
         "hh": float(trend.get("hh") or 0.0),
         "hl": float(trend.get("hl") or 0.0),
         "trend_score": float(trend.get("trend_score") or 0.0),
 
-        # Squeeze
         "bb_width": float(bb_w),
         "kc_width": float(kc_w),
         "squeeze_ratio": float(squeeze_ratio),
         "squeeze_on": float(squeeze_on),
 
-        # Volume
         "rel_volume": float(rel_vol),
 
-        # Common indicators
         "sma_20": float(sma_20),
         "ema_9": float(ema_9),
         "rsi_14": float(rsi_14),
         "sd_20": float(sd_20),
         "sma20_dist": float(pct_change(last_price, sma_20)) if sma_20 else 0.0,
 
-        # Market proxy features
         **mkt,
     }
 
-    # Merge intraday context if present (avoid collisions)
     ctx = node.get("context_dt") or {}
     if isinstance(ctx, dict):
         for k, v_ in ctx.items():
@@ -426,16 +407,13 @@ def build_intraday_features(
     now_utc: datetime | None = None,
     ignore_min_interval: bool = False
 ) -> Dict[str, Any]:
-    """Compute features_dt for each symbol in rolling."""
     rolling = _read_rolling() or {}
     if not isinstance(rolling, dict) or not rolling:
         log("[dt_features] ⚠️ rolling empty, nothing to do.")
         return {"symbols": 0, "updated": 0}
 
     tf_key = (os.getenv("DT_FEATURE_TF", "5Min") or "5Min").strip()
-
     now_utc = now_utc or datetime.now(timezone.utc)
-
     tf_key = "1Min" if tf_key.lower().startswith("1") else "5Min"
 
     min_int = 0.0 if ignore_min_interval else _env_float("DT_FEATURES_MIN_INTERVAL", 0.0)
