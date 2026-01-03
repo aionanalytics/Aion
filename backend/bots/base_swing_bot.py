@@ -37,9 +37,79 @@ from __future__ import annotations
 import json
 import gzip
 from dataclasses import dataclass, asdict
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
+
+# ---------------------------------------------------------------------------
+# Env helpers (swing knobs live in env; see knobs.env)
+# ---------------------------------------------------------------------------
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        raw = (os.getenv(name, "") or "").strip()
+        return float(raw) if raw else float(default)
+    except Exception:
+        return float(default)
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        raw = (os.getenv(name, "") or "").strip()
+        return int(float(raw)) if raw else int(default)
+    except Exception:
+        return int(default)
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = (os.getenv(name, "") or "").strip().lower()
+    if raw in {"1","true","yes","y","on"}:
+        return True
+    if raw in {"0","false","no","n","off"}:
+        return False
+    return bool(default)
+
+def apply_swing_env_overrides(cfg: "SwingBotConfig") -> "SwingBotConfig":
+    """Mutate cfg in-place using SWING_* env knobs (best-effort)."""
+    try:
+        cfg.conf_threshold = _env_float("SWING_CONF_THRESHOLD", cfg.conf_threshold)
+        cfg.max_positions = _env_int("SWING_MAX_POSITIONS", cfg.max_positions)
+        cfg.max_weight_per_name = _env_float("SWING_MAX_WEIGHT_PER_NAME", cfg.max_weight_per_name)
+        cfg.low_conf_max_fraction = _env_float("SWING_LOW_CONF_MAX_FRACTION", cfg.low_conf_max_fraction)
+
+        # Phase 4
+        cfg.starter_fraction = _env_float("SWING_STARTER_FRAC", cfg.starter_fraction)
+        cfg.add_fraction = _env_float("SWING_ADD_FRAC", cfg.add_fraction)
+        cfg.max_build_stages = _env_int("SWING_MAX_BUILD_STAGES", cfg.max_build_stages)
+        cfg.min_days_between_adds = _env_int("SWING_MIN_DAYS_BETWEEN_ADDS", cfg.min_days_between_adds)
+        cfg.add_conf_extra = _env_float("SWING_ADD_CONF_EXTRA", cfg.add_conf_extra)
+        cfg.allow_build_adds = _env_bool("SWING_ALLOW_BUILDS", True)
+    except Exception:
+        pass
+    # Phase 5: time-based holding / exit discipline
+    cfg.min_hold_days = int(_env_int("SWING_MIN_HOLD_DAYS", cfg.min_hold_days))
+    cfg.time_stop_days = int(_env_int("SWING_TIME_STOP_DAYS", cfg.time_stop_days))
+    cfg.exit_confirmations = int(_env_int("SWING_EXIT_CONFIRMATIONS", cfg.exit_confirmations))
+    cfg.exit_conf_buffer = float(_env_float("SWING_EXIT_CONF_BUFFER", cfg.exit_conf_buffer))
+
+    # Phase 7: calibrated P(hit) + EV sizing
+    cfg.use_phit = _env_bool("SWING_USE_PHIT", cfg.use_phit)
+    cfg.min_phit = float(_env_float("SWING_MIN_PHIT", cfg.min_phit))
+    cfg.loss_est_pct = float(_env_float("SWING_LOSS_EST_PCT", cfg.loss_est_pct))
+    cfg.require_positive_ev = _env_bool("SWING_REQUIRE_POS_EV", cfg.require_positive_ev)
+    cfg.ev_power = float(_env_float("SWING_EV_POWER", cfg.ev_power))
+
+    # sane clamps
+    cfg.min_hold_days = max(0, int(cfg.min_hold_days))
+    cfg.time_stop_days = max(cfg.min_hold_days + 1, int(cfg.time_stop_days))
+    cfg.exit_confirmations = max(1, int(cfg.exit_confirmations))
+    cfg.exit_conf_buffer = max(0.0, min(0.50, float(cfg.exit_conf_buffer)))
+
+    # Phase 7 clamps
+    cfg.min_phit = max(0.50, min(0.90, float(cfg.min_phit)))
+    cfg.loss_est_pct = max(0.0, min(0.50, float(cfg.loss_est_pct)))
+    cfg.ev_power = max(0.25, min(3.0, float(cfg.ev_power)))
+
+    return cfg
 from backend.bots.brains.swing_brain_v2 import rank_universe_v2
 
 # ---------------------------------------------------------------------
@@ -82,6 +152,12 @@ except Exception:  # pragma: no cover
 
     def bump_swing_metric(_name: str, _amount: float = 1.0) -> None:  # type: ignore
         return
+
+# Swing Phase 7: calibrated P(hit) helper (optional)
+try:
+    from backend.calibration.phit_calibrator_swing import get_phit as _get_phit  # type: ignore
+except Exception:  # pragma: no cover
+    _get_phit = None  # type: ignore
 
 ROOT = Path(PATHS.get("root", "."))
 ML_DATA = Path(PATHS["ml_data"])
@@ -133,6 +209,22 @@ def _bot_is_enabled(bot_key: str) -> bool:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _days_held(pos: "Position", now: datetime | None = None) -> int:
+    """Return integer number of full days held (best-effort)."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        ts = (getattr(pos, "entry_ts", "") or "").strip()
+        if not ts:
+            return 0
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.astimezone(timezone.utc)
+        return max(0, int((now - dt).total_seconds() // 86400))
+    except Exception:
+        return 0
 
 
 def _today() -> str:
@@ -187,7 +279,29 @@ class SwingBotConfig:
     stop_loss_pct: float      # -0.05 → -5%
     take_profit_pct: float    # 0.10 → +10%
     max_weight_per_name: float  # max fraction of equity in one symbol
+    # Phase 4: position building (starter entries + adds)
+    starter_fraction: float = 0.35          # fraction of desired size on first entry
+    add_fraction: float = 0.33              # fraction of desired size per add
+    max_build_stages: int = 3               # 1=starter, 2..N=adds
+    min_days_between_adds: int = 1
+    add_conf_extra: float = 0.03            # require conf >= conf_threshold + add_conf_extra to add
+    allow_build_adds: bool = True
     initial_cash: float = 100.0
+
+    # Phase 5: time-based holding / exit discipline (reduce churn)
+    min_hold_days: int = 2            # ignore SELL flips for N days (stop-loss still applies)
+    time_stop_days: int = 12          # if it's not working by then, free the capital
+    exit_confirmations: int = 2       # consecutive SELL signals required
+    exit_conf_buffer: float = 0.05    # SELL must exceed conf_threshold by this margin
+
+    # Phase 7: calibrated P(hit) + EV-based sizing (optional; defaults ON)
+    use_phit: bool = True
+    min_phit: float = 0.52
+    # Expected loss on a miss as a fraction of price (seatbelt for EV sizing).
+    # If you prefer, set to your typical stop distance.
+    loss_est_pct: float = 0.06
+    # If True, require EV > 0 to allocate size; otherwise allow small "exploratory" size.
+    require_positive_ev: bool = True
 
 
 @dataclass
@@ -196,6 +310,11 @@ class Position:
     entry: float
     stop: float
     target: float
+
+    # Phase 4: starter entries + adds (position build state)
+    goal_qty: float = 0.0           # desired full size in shares at last rebalance
+    build_stage: int = 0            # 0 = none, 1 = starter, 2..N = adds
+    last_add_ts: str = ""           # ISO8601 Z
 
 
 @dataclass
@@ -218,6 +337,9 @@ class BotState:
                 entry=_safe_float(pd.get("entry"), 0.0),
                 stop=_safe_float(pd.get("stop"), 0.0),
                 target=_safe_float(pd.get("target"), 0.0),
+                goal_qty=_safe_float(pd.get("goal_qty"), 0.0),
+                build_stage=int(_safe_float(pd.get("build_stage"), 0.0) or 0),
+                last_add_ts=str(pd.get("last_add_ts") or ""),
             )
         return cls(
             cash=cash,
@@ -276,6 +398,9 @@ class SwingBot:
 
         # Apply runtime overrides from configs.json (if present)
         self._apply_runtime_overrides()
+
+        # Apply env knobs (knobs.env) last so deploys can tune without code changes.
+        apply_swing_env_overrides(self.cfg)
 
         log(
             f"[{self.cfg.bot_key}] SwingBot initialized — "
@@ -643,26 +768,63 @@ class SwingBot:
                     reject_events += 1
                     reject_counts["conf_below_threshold"] = reject_counts.get("conf_below_threshold", 0) + 1
                 continue
-            if exp_ret <= 0.0:
-                # This is the first place we can measure "missed opportunities" later:
-                # we had a BUY intent + enough confidence, but rejected due to edge.
+            # Phase 7: calibrated probability-of-hit + EV (expected value) gating.
+            p_hit = float(pol_conf)
+            if self.cfg.use_phit and callable(get_phit_swing):
+                try:
+                    p_hit = float(get_phit_swing(
+                        base_conf=float(pol_conf),
+                        expected_return=float(exp_ret),
+                        regime_label=str(regime),
+                    ))
+                except Exception:
+                    p_hit = float(pol_conf)
+            p_hit = max(0.0, min(0.999, p_hit))
+
+            # Optional gate: if P(hit) isn't above coin-flip + margin, don't allocate.
+            if self.cfg.use_phit and p_hit < float(self.cfg.min_phit):
+                if log_reject and reject_events < max_reject_events:
+                    append_swing_event({
+                        "type": "swing_reject",
+                        "bot": self.cfg.bot_key,
+                        "symbol": str(sym).upper(),
+                        "reason": "phit_below_threshold",
+                        "intent": intent,
+                        "confidence": float(pol_conf),
+                        "p_hit": float(p_hit),
+                        "min_phit": float(self.cfg.min_phit),
+                        "expected_return": float(exp_ret),
+                        "price": float(price),
+                    })
+                    reject_events += 1
+                    reject_counts["phit_below_threshold"] = reject_counts.get("phit_below_threshold", 0) + 1
+                continue
+
+            # EV model: hit → +expected_return, miss → -loss_est_pct
+            loss_est = max(0.0, float(self.cfg.loss_est_pct))
+            ev = (p_hit * float(exp_ret)) - ((1.0 - p_hit) * loss_est)
+
+            if self.cfg.require_positive_ev and ev <= 0.0:
                 if log_reject and reject_events < max_reject_events:
                     append_swing_event({
                         "type": "swing_missed_candidate",
                         "bot": self.cfg.bot_key,
                         "symbol": str(sym).upper(),
-                        "reason": "non_positive_expected_return",
+                        "reason": "non_positive_ev",
                         "intent": intent,
                         "confidence": float(pol_conf),
+                        "p_hit": float(p_hit),
                         "expected_return": float(exp_ret),
+                        "loss_est_pct": float(loss_est),
+                        "ev": float(ev),
                         "price": float(price),
                     })
                     reject_events += 1
-                    reject_counts["non_positive_expected_return"] = reject_counts.get("non_positive_expected_return", 0) + 1
-                continue  # require positive edge for now
+                    reject_counts["non_positive_ev"] = reject_counts.get("non_positive_ev", 0) + 1
+                continue
 
-            # Base AI score: expected return * confidence
-            ai_score = exp_ret * (0.5 + 0.5 * pol_conf)  # weight confidence 50%
+            # Base AI score (Phase 7): EV * confidence
+            ai_score = (max(0.0, float(ev)) ** float(self.cfg.ev_power)) * (0.5 + 0.5 * pol_conf)
 
             # Add a bit of raw policy score (directional conviction)
             ai_score += 0.5 * pol_score
@@ -819,39 +981,79 @@ class SwingBot:
             qty_delta = diff_value / px
 
             if qty_delta > 0:
-                # BUY / increase
-                qty = qty_delta
-                state.cash -= qty * px
-                if pos:
-                    total_qty = pos.qty + qty
-                    if total_qty <= 0:
-                        continue
-                    new_entry = (pos.entry * pos.qty + px * qty) / total_qty
-                    pos.qty = total_qty
-                    pos.entry = new_entry
-                    pos.stop = new_entry * (1.0 + self.cfg.stop_loss_pct)
-                    pos.target = new_entry * (1.0 + self.cfg.take_profit_pct)
-                else:
-                    state.positions[sym] = Position(
-                        qty=qty,
-                        entry=px,
-                        stop=px * (1.0 + self.cfg.stop_loss_pct),
-                        target=px * (1.0 + self.cfg.take_profit_pct),
-                    )
-                trades.append(
-                    Trade(
-                        t=_now_iso(),
-                        symbol=sym,
-                        side="BUY",
-                        qty=qty,
-                        price=px,
-                        reason="TARGET_REBALANCE",
-                    )
-                )
-                log(
-                    f"[{self.cfg.bot_key}] BUY {qty:.4f} {sym} @ {px:.4f} "
-                    f"(target_w={target_w:.3f})"
-                )
+                # BUY / increase (Phase 4: starter entry + adds)
+                desired_qty = float(target_value / max(px, 1e-9))
+                signal = _extract_policy_signal(rolling.get(sym) if isinstance(rolling, dict) else None) or {}
+                sig_conf = float(signal.get("confidence") or 0.0)
+
+                buy_qty = float(qty_delta)
+
+                # New position → starter entry only
+                if pos is None or pos.qty <= 0:
+                    buy_qty = min(buy_qty, max(0.0, desired_qty * float(self.cfg.starter_fraction)))
+                    if buy_qty > 0:
+                        state.positions[sym] = Position(
+                            qty=float(buy_qty),
+                            entry=float(px),
+                            stop=float(px * 0.90),
+                            target=float(px * 1.10),
+                            goal_qty=float(desired_qty),
+                            build_stage=1,
+                            last_add_ts=_now_iso(),
+                            entry_ts=_now_iso(),
+                        )
+                        pos = state.positions[sym]
+
+                # Existing position → optional adds toward desired size
+                elif bool(getattr(self.cfg, "allow_build_adds", True)) and pos.qty < desired_qty and int(getattr(self.cfg, "max_build_stages", 3)) > 1:
+                    # Gate adds: confidence and time spacing
+                    can_add = True
+                    try:
+                        if pos.last_add_ts:
+                            last_dt = datetime.fromisoformat(str(pos.last_add_ts).replace("Z", "+00:00"))
+                            if last_dt.tzinfo is None:
+                                last_dt = last_dt.replace(tzinfo=timezone.utc)
+                            days = (datetime.now(timezone.utc).date() - last_dt.astimezone(timezone.utc).date()).days
+                            if days < int(getattr(self.cfg, "min_days_between_adds", 1)):
+                                can_add = False
+                    except Exception:
+                        pass
+
+                    if sig_conf < float(self.cfg.conf_threshold) + float(getattr(self.cfg, "add_conf_extra", 0.03)):
+                        can_add = False
+
+                    if int(getattr(pos, "build_stage", 0)) >= int(getattr(self.cfg, "max_build_stages", 3)):
+                        can_add = False
+
+                    if can_add:
+                        step_qty = max(0.0, desired_qty * float(getattr(self.cfg, "add_fraction", 0.33)))
+                        remaining = max(0.0, desired_qty - float(pos.qty))
+                        buy_qty = min(buy_qty, step_qty, remaining)
+                        if buy_qty > 0:
+                            pos.build_stage = int(getattr(pos, "build_stage", 0)) + 1
+                            pos.last_add_ts = _now_iso()
+
+                # If we didn't create/add under build rules, fall back to classic rebalance qty.
+                if buy_qty > 0:
+                    state.cash -= buy_qty * px
+                    if pos:
+                        # Weighted-average entry
+                        total = float(pos.qty) + float(buy_qty)
+                        pos.entry = float((pos.entry * float(pos.qty) + px * float(buy_qty)) / max(total, 1e-9))
+                        pos.qty = float(total)
+                        pos.goal_qty = float(desired_qty)
+                        state.positions[sym] = pos
+                    else:
+                        state.positions[sym] = Position(qty=float(buy_qty), entry=float(px), stop=float(px * 0.90), target=float(px * 1.10), goal_qty=float(desired_qty), build_stage=1, last_add_ts=_now_iso())
+
+                    trades.append({
+                        "symbol": sym,
+                        "side": "BUY",
+                        "qty": float(buy_qty),
+                        "price": float(px),
+                        "ts": _now_iso(),
+                    })
+                    log(f"[{self.cfg.bot_key}] BUY {sym} qty={buy_qty:.4f} px={px:.2f} cash={state.cash:.2f}")
             else:
                 # SELL / decrease
                 qty = abs(qty_delta)
@@ -947,30 +1149,58 @@ class SwingBot:
                     f"PnL={pnl:.2f}"
                 )
                 del state.positions[sym]
-                continue
-
-            # AI SELL override via policy
+                continue            # Phase 5: time stop (let time work, but not forever)
+            held_days = _days_held(pos)
+            if held_days >= self.cfg.time_stop_days:
+                pnl = (px - pos.entry) * pos.qty
+                if pnl <= (0.01 * pos.entry * pos.qty):
+                    state.cash += pos.qty * px
+                    trades.append(
+                        Trade(
+                            t=_now_iso(),
+                            symbol=sym,
+                            side="SELL",
+                            qty=pos.qty,
+                            price=px,
+                            reason=f"time_stop(days={held_days})",
+                            confidence=1.0,
+                            pnl=pnl,
+                        )
+                    )
+                    log(f"[{self.cfg.bot_key}] TIME_STOP SELL {pos.qty:.4f} {sym} @ {px:.4f} PnL={pnl:.2f}")
+                    del state.positions[sym]
+                    continue            # Phase 5: less twitchy exits — require hold time + confirmation
             node = rolling.get(sym) or {}
             intent, pol_conf, _ = self._extract_policy_signal(node)
             if intent == "SELL" and pol_conf >= self.cfg.conf_threshold:
-                pnl = (px - pos.entry) * pos.qty
-                state.cash += pos.qty * px
-                trades.append(
-                    Trade(
-                        t=_now_iso(),
-                        symbol=sym,
-                        side="SELL",
-                        qty=pos.qty,
-                        price=px,
-                        reason=f"AI_SELL_{pol_conf:.2f}",
-                        pnl=pnl,
-                    )
-                )
-                log(
-                    f"[{self.cfg.bot_key}] AI SELL EXIT {pos.qty:.4f} {sym} @ {px:.4f} "
-                    f"PnL={pnl:.2f}"
-                )
-                del state.positions[sym]
+                held_days = _days_held(pos)
+                if held_days < self.cfg.min_hold_days:
+                    pos.pending_exit = 0
+                elif pol_conf < (self.cfg.conf_threshold + self.cfg.exit_conf_buffer):
+                    pos.pending_exit = 0
+                else:
+                    pos.pending_exit = int(getattr(pos, "pending_exit", 0) or 0) + 1
+                    pos.last_exit_signal_ts = _now_iso()
+                    if pos.pending_exit >= self.cfg.exit_confirmations:
+                        pnl = (px - pos.entry) * pos.qty
+                        state.cash += pos.qty * px
+                        trades.append(
+                            Trade(
+                                t=_now_iso(),
+                                symbol=sym,
+                                side="SELL",
+                                qty=pos.qty,
+                                price=px,
+                                reason=f"ai_sell_confirmed({pos.pending_exit}/{self.cfg.exit_confirmations})",
+                                confidence=pol_conf,
+                                pnl=pnl,
+                            )
+                        )
+                        log(f"[{self.cfg.bot_key}] AI_CONFIRM SELL {pos.qty:.4f} {sym} @ {px:.4f} PnL={pnl:.2f}")
+                        del state.positions[sym]
+                        continue
+            else:
+                pos.pending_exit = 0
 
         state.last_equity = self.compute_equity(state, prices)
         state.last_updated = _now_iso()
