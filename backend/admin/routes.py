@@ -26,10 +26,15 @@ def _extract_token(req: Request) -> str:
     return (req.headers.get("x-admin-token") or "").strip()
 
 
-def _require_admin(req: Request) -> None:
+def admin_required_req(req: Request) -> str:
+    """
+    FastAPI dependency that validates admin token extracted from headers.
+    Returns the token (handy for logging/auditing if needed).
+    """
     token = _extract_token(req)
     if not token or not require_admin(token):
         raise HTTPException(status_code=403, detail="forbidden")
+    return token
 
 
 # --- Auth ---
@@ -52,9 +57,7 @@ async def admin_login(req: Request) -> Dict[str, Any]:
 
 # --- Replay control ---
 @router.post("/replay/start")
-async def replay_start(req: Request) -> Dict[str, Any]:
-    _require_admin(req)
-
+async def replay_start(req: Request, _: str = Depends(admin_required_req)) -> Dict[str, Any]:
     try:
         payload = await req.json()
     except Exception:
@@ -67,17 +70,21 @@ async def replay_start(req: Request) -> Dict[str, Any]:
 
 
 @router.get("/replay/status")
-async def replay_status(req: Request) -> Dict[str, Any]:
-    _require_admin(req)
+async def replay_status(_: str = Depends(admin_required_req)) -> Dict[str, Any]:
     return get_replay_status()
 
 
 # --- Restart services ---
 @router.post("/system/restart")
-def restart_services(_: str = Depends(require_admin)):
+def restart_services(_: str = Depends(admin_required_req)):
+    """
+    NOTE:
+      In multi-worker uvicorn, this only terminates *this* worker process.
+      Your process manager (systemd/supervisor/docker) should restart it.
+    """
     def delayed_exit():
         time.sleep(1.5)
         os.kill(os.getpid(), signal.SIGTERM)
 
     threading.Thread(target=delayed_exit, daemon=True).start()
-    return {"status": "ok", "message": "Restarting services"}
+    return {"status": "ok", "message": "Terminating this process for restart"}

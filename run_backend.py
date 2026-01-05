@@ -162,10 +162,18 @@ def uvicorn_cmd(
     return cmd
 
 
-def launch(cmd: list[str], name: str) -> subprocess.Popen:
+def launch(cmd: list[str], name: str, env_overrides: Optional[dict[str, str]] = None) -> subprocess.Popen:
     print(f"🚀 Starting {name}...")
     append_log(f"Starting {name}")
     prune_old_logs()
+
+    env = os.environ.copy()
+    if env_overrides:
+        for k, v in env_overrides.items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[str(k)] = str(v)
 
     return subprocess.Popen(
         cmd,
@@ -173,7 +181,7 @@ def launch(cmd: list[str], name: str) -> subprocess.Popen:
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,  # line-buffered
-        env=os.environ.copy(),
+        env=env,
     )
 
 
@@ -229,6 +237,11 @@ if __name__ == "__main__":
     backend_host = _normalize_bind_host(os.environ.get("APP_HOST", "0.0.0.0"))
     backend_port = os.environ.get("APP_PORT", "8000")
 
+    # ✅ Dedicated scheduler backend (single worker, scheduler enabled)
+    # Use separate host/port so it can't collide with the API server.
+    scheduler_host = _normalize_bind_host(os.environ.get("SCHEDULER_HOST", backend_host))
+    scheduler_port = os.environ.get("SCHEDULER_PORT", "8001")
+
     dt_host = _normalize_bind_host(os.environ.get("DT_APP_HOST", "0.0.0.0"))
     dt_port = os.environ.get("DT_APP_PORT", "8010")
 
@@ -240,25 +253,44 @@ if __name__ == "__main__":
     UVICORN_ACCESS_LOG = _env_bool("UVICORN_ACCESS_LOG", default=False)
     UVICORN_RELOAD = _env_bool("UVICORN_RELOAD", default=False)
 
-    # ✅ Workers (requested: 4)
-    # You can override with APP_WORKERS / DT_APP_WORKERS if needed.
-    BACKEND_WORKERS = _env_int("APP_WORKERS", 1)
+    # ----------------------------------------------------------------------------
+    # ✅ Worker plan (this is the "how you run it" baked into code)
+    #
+    # API/UI backend: workers=2, scheduler disabled
+    # Scheduler backend: workers=1, scheduler enabled
+    #
+    # Equivalent shell commands:
+    #   export AION_ROLE=api
+    #   export ENABLE_SCHEDULER=0
+    #   uvicorn backend.backend_service:app --host 0.0.0.0 --port 8000 --workers 2
+    #
+    #   export AION_ROLE=scheduler
+    #   export ENABLE_SCHEDULER=1
+    #   uvicorn backend.backend_service:app --host 0.0.0.0 --port 8001 --workers 1
+    # ----------------------------------------------------------------------------
+
+    # You can override workers in env, but defaults match the plan above.
+    BACKEND_WORKERS = _env_int("APP_WORKERS", 2)          # ✅ faster UI/API
+    SCHEDULER_WORKERS = _env_int("SCHEDULER_WORKERS", 1)  # ✅ single-owner scheduler
+
     DT_WORKERS = _env_int("DT_APP_WORKERS", 1)
     REPLAY_WORKERS = _env_int("REPLAY_APP_WORKERS", 1)
 
     print("────────────────────────────────────────")
     print("🚀 Launching AION Analytics system")
-    print(f"   • backend          → http://{backend_host}:{backend_port} (workers={BACKEND_WORKERS})")
-    print(f"   • dt_backend       → http://{dt_host}:{dt_port} (workers={DT_WORKERS})")
-    print(f"   • replay_service   → http://{replay_host}:{replay_port} (dormant, workers={REPLAY_WORKERS})")
+    print(f"   • backend API/UI    → http://{backend_host}:{backend_port} (workers={BACKEND_WORKERS}, ENABLE_SCHEDULER=0)")
+    print(f"   • backend scheduler → http://{scheduler_host}:{scheduler_port} (workers={SCHEDULER_WORKERS}, ENABLE_SCHEDULER=1)")
+    print(f"   • dt_backend        → http://{dt_host}:{dt_port} (workers={DT_WORKERS})")
+    print(f"   • replay_service    → http://{replay_host}:{replay_port} (dormant, workers={REPLAY_WORKERS})")
     if _should_silence_supervisor_agent():
-        print("   • logs             → supervisor_agent SILENCED (set SILENCE_SUPERVISOR_AGENT=0 to show)")
+        print("   • logs              → supervisor_agent SILENCED (set SILENCE_SUPERVISOR_AGENT=0 to show)")
     print("────────────────────────────────────────", flush=True)
 
     append_log("AION system starting")
     prune_old_logs()
 
-    backend_proc = launch(
+    # ✅ 1) Backend API/UI (2 workers, scheduler OFF)
+    backend_api_proc = launch(
         uvicorn_cmd(
             "backend.backend_service:app",
             backend_host,
@@ -268,10 +300,34 @@ if __name__ == "__main__":
             reload=UVICORN_RELOAD,
             workers=BACKEND_WORKERS,
         ),
-        "backend",
+        "backend_api",
+        env_overrides={
+            "AION_ROLE": "api",
+            "ENABLE_SCHEDULER": "0",
+        },
     )
-    threading.Thread(target=pipe_output, args=(backend_proc, "backend"), daemon=True).start()
+    threading.Thread(target=pipe_output, args=(backend_api_proc, "backend_api"), daemon=True).start()
 
+    # ✅ 2) Backend Scheduler (1 worker, scheduler ON)
+    backend_sched_proc = launch(
+        uvicorn_cmd(
+            "backend.backend_service:app",
+            scheduler_host,
+            scheduler_port,
+            log_level=UVICORN_LOG_LEVEL,
+            access_log=UVICORN_ACCESS_LOG,
+            reload=UVICORN_RELOAD,
+            workers=SCHEDULER_WORKERS,
+        ),
+        "backend_scheduler",
+        env_overrides={
+            "AION_ROLE": "scheduler",
+            "ENABLE_SCHEDULER": "1",
+        },
+    )
+    threading.Thread(target=pipe_output, args=(backend_sched_proc, "backend_scheduler"), daemon=True).start()
+
+    # DT backend API
     dt_proc = launch(
         uvicorn_cmd(
             "dt_backend.fastapi_main:app",
@@ -316,8 +372,11 @@ if __name__ == "__main__":
 
     try:
         while True:
-            if backend_proc.poll() is not None:
-                raise RuntimeError("backend process exited")
+            if backend_api_proc.poll() is not None:
+                raise RuntimeError("backend API/UI process exited")
+
+            if backend_sched_proc.poll() is not None:
+                raise RuntimeError("backend scheduler process exited")
 
             if dt_proc.poll() is not None:
                 raise RuntimeError("dt_backend (API) process exited")
@@ -352,6 +411,9 @@ if __name__ == "__main__":
         shutdown_process(replay_proc, "replay_service")
         shutdown_process(dt_worker_proc, dt_worker_name)
         shutdown_process(dt_proc, "dt_backend")
-        shutdown_process(backend_proc, "backend")
+
+        shutdown_process(backend_sched_proc, "backend_scheduler")
+        shutdown_process(backend_api_proc, "backend_api")
+
         time.sleep(2)
         append_log("AION system stopped")

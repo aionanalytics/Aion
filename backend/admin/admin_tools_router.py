@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import subprocess
 import json
-from pathlib import Path
+import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
 
 from backend.admin.deps import admin_required
 from backend.core.config import PATHS
@@ -28,27 +28,44 @@ class SupabaseSyncRequest(BaseModel):
 
 
 from backend.historical_replay_swing.job_manager import REPLAY_STATE_PATH
+
 SWING_REPLAY_STATE = REPLAY_STATE_PATH
+
+
+def _as_path(x) -> Optional[Path]:
+    """PATHS may store Path or str. Normalize safely."""
+    if not x:
+        return None
+    if isinstance(x, Path):
+        return x
+    try:
+        return Path(str(x))
+    except Exception:
+        return None
+
 
 # ------------------------------------------------------------------
 # Lock locations (DIRECTORIES)
 # ------------------------------------------------------------------
 
-LOCK_DIRS = [
+_nightly_lock = _as_path(PATHS.get("nightly_lock"))
+_swing_replay_lock = _as_path(PATHS.get("swing_replay_lock"))
+
+LOCK_DIRS: list[Path] = [
     ROOT / "data" / "locks",
     ROOT / "data" / "replay" / "locks",
-    Path(PATHS.get("nightly_lock")).parent if PATHS.get("nightly_lock") else (ROOT / "da_brains"),
-    Path(PATHS.get("swing_replay_lock")).parent if PATHS.get("swing_replay_lock") else (ROOT / "data" / "replay" / "locks"),
+    (_nightly_lock.parent if _nightly_lock else (ROOT / "da_brains")),
+    (_swing_replay_lock.parent if _swing_replay_lock else (ROOT / "data" / "replay" / "locks")),
 ]
 
 # ------------------------------------------------------------------
 # Lock locations (EXPLICIT FILES)
 # ------------------------------------------------------------------
 
-LOCK_FILES = [
-    PATHS.get("nightly_lock"),        # da_brains/nightly_job.lock
-    PATHS.get("swing_replay_lock"),   # data/replay/swing/replay.lock
+LOCK_FILES: list[Path] = [
+    p for p in [_nightly_lock, _swing_replay_lock] if p is not None
 ]
+
 
 # --------------------------------------------------
 # Logs
@@ -57,6 +74,7 @@ LOCK_FILES = [
 @router.get("/logs")
 def get_logs(_: None = Depends(admin_required)):
     return {"lines": tail_lines(300)}
+
 
 # --------------------------------------------------
 # Clear locks + reset replay
@@ -68,57 +86,64 @@ def clear_locks(_: None = Depends(admin_required)):
 
     # 1️⃣ Remove lock files
     for lf in LOCK_FILES:
-        if lf and lf.exists():
-            try:
+        try:
+            if lf.exists() and (lf.is_file() or lf.is_symlink()):
                 lf.unlink()
                 removed.append(str(lf))
-            except Exception:
-                pass
+        except Exception:
+            pass
 
-# 2️⃣ Remove locks inside known lock directories (SAFETY: only *.lock files)
+    # 2️⃣ Remove locks inside known lock directories (SAFETY: only *.lock files)
     for lock_dir in LOCK_DIRS:
-        if not lock_dir.exists():
-            continue
+        try:
+            if not lock_dir.exists():
+                continue
 
-        # Only remove lock files, never arbitrary files
-        for p in lock_dir.glob("*.lock"):
-            try:
-                if p.is_file() or p.is_symlink():
-                    p.unlink()
-                    removed.append(str(p))
-            except Exception:
-                pass
+            # Only remove lock files, never arbitrary files
+            for p in lock_dir.glob("*.lock"):
+                try:
+                    if p.is_file() or p.is_symlink():
+                        p.unlink()
+                        removed.append(str(p))
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
-# 3️⃣ Reset replay state
-    if SWING_REPLAY_STATE.exists():
-        clean_state = {
-            "status": "idle",
-            "version": "v1",
-            "started_at": None,
-            "finished_at": None,
-            "start_date": None,
-            "end_date": None,
-            "current_day": "",
-            "completed_days": [],
-            "days_completed": 0,
-            "total_days": 0,
-            "percent_complete": 0.0,
-            "elapsed_secs": 0.0,
-            "eta_secs": None,
-            "last_error": None,
-            "notes": [],
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
+    # 3️⃣ Reset replay state
+    try:
+        if SWING_REPLAY_STATE.exists():
+            clean_state = {
+                "status": "idle",
+                "version": "v1",
+                "started_at": None,
+                "finished_at": None,
+                "start_date": None,
+                "end_date": None,
+                "current_day": "",
+                "completed_days": [],
+                "days_completed": 0,
+                "total_days": 0,
+                "percent_complete": 0.0,
+                "elapsed_secs": 0.0,
+                "eta_secs": None,
+                "last_error": None,
+                "notes": [],
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
 
-        SWING_REPLAY_STATE.parent.mkdir(parents=True, exist_ok=True)
-        with open(SWING_REPLAY_STATE, "w", encoding="utf-8") as f:
-            json.dump(clean_state, f, indent=2)
+            SWING_REPLAY_STATE.parent.mkdir(parents=True, exist_ok=True)
+            with open(SWING_REPLAY_STATE, "w", encoding="utf-8") as f:
+                json.dump(clean_state, f, indent=2)
+    except Exception:
+        pass
 
     return {
         "status": "ok",
         "removed": removed,
         "replay_state_reset": True,
     }
+
 
 # --------------------------------------------------
 # Fetch Tickers
@@ -128,6 +153,7 @@ def clear_locks(_: None = Depends(admin_required)):
 def refresh_universes_tool(user=Depends(admin_required)):
     try:
         from utils.refresh_universes_from_alpaca import refresh_universes
+
         res = refresh_universes(write_files=True)
         return {
             "status": "ok",

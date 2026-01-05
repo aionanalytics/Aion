@@ -44,7 +44,7 @@ from utils.logger import log, warn
 from utils.json_tools import read_json_gz
 from utils.time_utils import ts
 
-from backend.config import PATHS
+from backend.core.config import PATHS
 
 # dt_backend broker paper account
 from dt_backend.engines.broker_api import get_positions, get_cash  # type: ignore

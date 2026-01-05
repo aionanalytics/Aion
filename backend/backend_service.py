@@ -1,15 +1,21 @@
-# backend/backend_service.py — v2.1.0 (router wiring fix)
+# backend/backend_service.py — v2.1.1 (worker-safe scheduler gating)
 """
 AION Analytics — Backend Service
 
 Responsibilities:
     • Mount all FastAPI routers
-    • Start scheduler + heartbeat in background threads
+    • (Optional) Start scheduler + heartbeat in background threads
     • Provide health & root diagnostic endpoints
+
+Important:
+    - If you run uvicorn with multiple workers, startup runs once per worker.
+    - Therefore the scheduler MUST be gated (or run as a separate single process),
+      otherwise you'll spawn multiple schedulers and overlap jobs.
 """
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from datetime import datetime
@@ -65,16 +71,27 @@ except Exception:
     cloud_sync = None
 
 # -------------------------------------------------
+# Feature gates (env controlled)
+# -------------------------------------------------
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+ENABLE_SCHEDULER = _env_flag("ENABLE_SCHEDULER", "0")      # must be OFF for multi-worker UI
+ENABLE_HEARTBEAT = _env_flag("ENABLE_HEARTBEAT", "1")      # harmless, but you can silence it
+ENABLE_CLOUDSYNC = _env_flag("ENABLE_CLOUDSYNC", "1")      # optional
+ROLE = os.getenv("AION_ROLE", "").strip().lower()          # optional: "api" or "scheduler"
+
+# -------------------------------------------------
 # FastAPI App Configuration
 # -------------------------------------------------
 
 app = FastAPI(
     title="AION Analytics Backend",
     description="Backend API + scheduler for AION Analytics.",
-    version="2.1.0",
+    version="2.1.1",
 )
 
-# Allow your frontend to connect
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -84,12 +101,9 @@ app.add_middleware(
 )
 
 # -------------------------------------------------
-# Mount Routers (all already include /api/* prefixes)
+# Mount Routers
 # -------------------------------------------------
 
-# NOTE:
-# Do NOT re-import router modules under the same names (e.g., `import ... as intraday_router`).
-# That overwrites the APIRouter object with a module, and `include_router()` will break.
 ROUTERS = [
     system_router,
     diagnostics_router,
@@ -125,8 +139,10 @@ for r in ROUTERS:
 async def root():
     return {
         "service": "AION Analytics Backend",
-        "version": "2.1.0",
+        "version": "2.1.1",
         "time": datetime.now(TIMEZONE).isoformat(),
+        "role": ROLE or "unspecified",
+        "enable_scheduler": ENABLE_SCHEDULER,
     }
 
 
@@ -135,6 +151,8 @@ async def health():
     return {
         "status": "ok",
         "time": datetime.now(TIMEZONE).isoformat(),
+        "role": ROLE or "unspecified",
+        "enable_scheduler": ENABLE_SCHEDULER,
     }
 
 # -------------------------------------------------
@@ -162,7 +180,6 @@ def _scheduler_thread():
 
 
 def _print_root_path():
-    # Ensure required folders/files exist (locks, configs, logs, bots UI stores, etc.)
     ensure_project_structure()
     try:
         root = PATHS.get("root")
@@ -182,26 +199,32 @@ async def on_startup():
 
     _print_root_path()
 
-    # Make the Bots UI deterministic on fresh starts (no "0 bots" surprise)
+    # Make the Bots UI deterministic on fresh starts
     try:
         from backend.services.bot_bootstrapper import bootstrap_bots_for_ui  # type: ignore
-
         bootstrap_bots_for_ui()
         print("[Backend] 🤖 Bot UI bootstrap complete.", flush=True)
     except Exception as e:
         print(f"[Backend] ⚠️ Bot UI bootstrap skipped: {e}", flush=True)
 
-    # Optional cloud sync
-    if cloud_sync:
+    # Optional cloud sync (usually fine in API process; if you want, gate it too)
+    if cloud_sync and ENABLE_CLOUDSYNC:
         try:
             print("[CloudSync] ☁️ Starting background sync tasks…", flush=True)
             cloud_sync.start_background_tasks()
         except Exception as e:
             print(f"[CloudSync] ⚠️ Cloud sync init failed: {e}", flush=True)
 
-    # Start heartbeat + scheduler threads
-    threading.Thread(target=_backend_heartbeat, daemon=True).start()
-    threading.Thread(target=_scheduler_thread, daemon=True).start()
+    # Heartbeat
+    if ENABLE_HEARTBEAT:
+        threading.Thread(target=_backend_heartbeat, daemon=True).start()
+
+    # Scheduler (MUST be gated or you will duplicate it under --workers > 1)
+    if ENABLE_SCHEDULER:
+        threading.Thread(target=_scheduler_thread, daemon=True).start()
+        print("[Backend] 🧭 Scheduler thread enabled.", flush=True)
+    else:
+        print("[Backend] 🧭 Scheduler thread disabled.", flush=True)
 
     print("[Backend] ✅ Startup complete — ready for requests.", flush=True)
 

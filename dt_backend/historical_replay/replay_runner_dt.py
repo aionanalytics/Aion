@@ -32,7 +32,11 @@ from typing import Any, Dict, List, Optional
 from dt_backend.core.config_dt import DT_PATHS
 from dt_backend.core.logger_dt import log
 
-from dt_backend.historical_replay.step_replay_engine_dt import StepReplayConfig, replay_intraday_day_step
+# ✅ FIX: import the real function + summary type; no StepReplayConfig exists
+from dt_backend.historical_replay.step_replay_engine_dt import (
+    replay_intraday_day_step,
+    StepReplaySummary,
+)
 from dt_backend.historical_replay.replay_metrics_dt import compute_metrics_from_trades
 
 
@@ -126,6 +130,7 @@ def run_replay(
     resume: bool,
     force_restart: bool,
     max_days: Optional[int] = None,
+    max_symbols: Optional[int] = None,
 ) -> Dict[str, Any]:
     runs_root = _runs_root()
     runs_root.mkdir(parents=True, exist_ok=True)
@@ -169,13 +174,18 @@ def run_replay(
         os.environ.update(env)
 
         try:
-            cfg = StepReplayConfig(step_minutes=int(step_minutes), max_symbols=None)
-            out = replay_intraday_day_step(day, cfg=cfg)
+            # ✅ FIX: call the real signature (keyword args)
+            out: StepReplaySummary = replay_intraday_day_step(
+                date_str=day,
+                step_minutes=int(step_minutes),
+                max_symbols=max_symbols,
+                exec_cfg=None,  # let engine default ExecutionConfig(dry_run=False)
+            )
 
             trades_path = Path(env["DT_TRUTH_DIR"]) / "dt_trades.jsonl"
             metrics = compute_metrics_from_trades(trades_path)
 
-            report = {"date": day, "engine": out, "metrics": metrics}
+            report = {"date": day, "engine": asdict(out), "metrics": metrics}
             day_reports.append(report)
 
             # Write per-day report
@@ -189,7 +199,11 @@ def run_replay(
             _save_state(state_path, st)
             _save_state(run_dir / "replay_state.json", st)
 
-            log(f"[replay_runner] ✅ {day} done: trades={metrics.get('trades',0)} avgR={metrics.get('avg_R',0):.3f}")
+            log(
+                f"[replay_runner] ✅ {day} done: "
+                f"steps={out.steps} predicted_steps={out.predicted_steps} "
+                f"trades={metrics.get('trades', 0)} avgR={metrics.get('avg_R', 0):.3f}"
+            )
 
         finally:
             # Restore env
@@ -205,7 +219,7 @@ def run_replay(
         "version": st.version,
         "start": st.start_date,
         "end": st.end_date,
-        "step_minutes": step_minutes,
+        "step_minutes": int(step_minutes),
         "days": len(day_reports),
         "reports": day_reports,
     }
@@ -231,17 +245,19 @@ def main() -> None:
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--force-restart", action="store_true")
     ap.add_argument("--max-days", type=int, default=None)
+    ap.add_argument("--max-symbols", type=int, default=None)
 
     args = ap.parse_args()
 
     out = run_replay(
         start=args.start,
         end=args.end,
-        step_minutes=args.step_minutes,
-        version=args.version,
+        step_minutes=int(args.step_minutes),
+        version=str(args.version),
         resume=bool(args.resume),
         force_restart=bool(args.force_restart),
         max_days=args.max_days,
+        max_symbols=args.max_symbols,
     )
     log(f"[replay_runner] done: {out}")
 

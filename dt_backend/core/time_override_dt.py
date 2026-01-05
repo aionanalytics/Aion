@@ -1,4 +1,5 @@
-"""dt_backend/core/time_override_dt.py
+"""
+dt_backend/core/time_override_dt.py
 
 Replay/backtest needs *deterministic time*.
 
@@ -40,13 +41,26 @@ def _parse_iso(s: str) -> Optional[datetime]:
         return None
 
 
+# -------------------------------------------------
+# Public helpers (EXPECTED BY IMPORTERS)
+# -------------------------------------------------
+
+def parse_utc(s: str) -> Optional[datetime]:
+    """
+    Parse an ISO8601 UTC timestamp safely.
+
+    Public alias used by replay/backtest modules.
+    """
+    return _parse_iso(s)
+
+
 def now_utc() -> datetime:
     """Return the effective UTC 'now'.
 
     If DT_NOW_UTC is set, returns that timestamp; otherwise real now.
     """
     override = (os.getenv("DT_NOW_UTC", "") or "").strip()
-    dt = _parse_iso(override) if override else None
+    dt = parse_utc(override) if override else None
     return dt or datetime.now(timezone.utc)
 
 
