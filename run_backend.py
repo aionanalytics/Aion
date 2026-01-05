@@ -21,23 +21,12 @@ def module_exists(mod: str) -> bool:
 # dotenv is optional; if .env has bad lines we don't want to crash boot
 try:
     from dotenv import load_dotenv
-
     load_dotenv()
 except Exception:
     pass
 
 # ---------------------------------------------------------------------------
 # Optional knobs env files (kept separate from API keys)
-#
-# Load order:
-#   1) .env (already loaded above)
-#   2) knobs.env
-#   3) dt_knobs.env
-#
-# override=False so real env vars / .env values win over knobs defaults.
-# You can override paths with:
-#   KNOBS_ENV_PATH=/abs/path/to/knobs.env
-#   DT_KNOBS_ENV_PATH=/abs/path/to/dt_knobs.env
 # ---------------------------------------------------------------------------
 try:
     from pathlib import Path as _Path
@@ -54,16 +43,10 @@ try:
     if _dt_knobs_path.exists():
         load_dotenv(dotenv_path=str(_dt_knobs_path), override=False)
 except Exception:
-    # Never block boot because of a knobs file.
     pass
 
 from utils.live_log import append_log, prune_old_logs
-
 from backend.core.config import PATHS
-
-print("ROLLING:", PATHS.get("rolling"))
-print("ROLLING_BODY:", PATHS.get("rolling_body"))
-print("ROLLING_BRAIN:", PATHS.get("rolling_brain"))
 
 # Quiet noisy libs
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API")
@@ -81,7 +64,6 @@ def _is_valid_bind_host(host: str) -> bool:
     h = (host or "").strip().lower()
     if not h:
         return False
-    # "0.0.0.1" is NOT a valid bind address; treat as invalid.
     if h == "0.0.0.1":
         return False
     return True
@@ -122,15 +104,6 @@ def uvicorn_cmd(
     reload: bool = False,
     workers: int = 1,
 ) -> list[str]:
-    """
-    Build a safe uvicorn command.
-    IMPORTANT: flags are presence-based. Never pass "false"/"true" as extra args.
-
-    NOTE:
-      If your FastAPI app starts background threads in @startup,
-      running multiple workers will multiply those threads. In production,
-      keep schedulers/supervisors in separate single-instance processes.
-    """
     cmd = [
         sys.executable,
         "-m",
@@ -144,14 +117,12 @@ def uvicorn_cmd(
         str(log_level),
     ]
 
-    # access log is a boolean flag in uvicorn; use --no-access-log to disable.
     if not access_log:
         cmd.append("--no-access-log")
 
     if reload:
         cmd.append("--reload")
 
-    # ✅ workers
     try:
         w = int(workers)
         if w > 1 and not reload:
@@ -180,14 +151,12 @@ def launch(cmd: list[str], name: str, env_overrides: Optional[dict[str, str]] = 
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=1,  # line-buffered
+        bufsize=1,
         env=env,
     )
 
 
 def _should_silence_supervisor_agent() -> bool:
-    # Default ON: silences spammy supervisor_agent lines in console + live_log.
-    # Set SILENCE_SUPERVISOR_AGENT=0 to show them.
     return _env_bool("SILENCE_SUPERVISOR_AGENT", default=True)
 
 
@@ -198,7 +167,6 @@ def pipe_output(proc: subprocess.Popen, name: str):
     silence_supervisor = _should_silence_supervisor_agent()
 
     for line in proc.stdout:
-        # Optional: silence supervisor_agent spam (does not stop it running, just hides its log lines)
         if silence_supervisor and ("[supervisor_agent]" in line or "supervisor_agent" in line):
             continue
 
@@ -223,7 +191,6 @@ def shutdown_process(p: Optional[subprocess.Popen], name: str = ""):
         if platform.system() == "Windows":
             p.terminate()
         else:
-            # SIGINT lets uvicorn shutdown gracefully
             p.send_signal(signal.SIGINT)
     except Exception:
         try:
@@ -233,14 +200,11 @@ def shutdown_process(p: Optional[subprocess.Popen], name: str = ""):
 
 
 if __name__ == "__main__":
-    # Bind hosts (server should be 0.0.0.0 to listen externally)
     backend_host = _normalize_bind_host(os.environ.get("APP_HOST", "0.0.0.0"))
-    backend_port = os.environ.get("APP_PORT", "8000")
+    primary_port = os.environ.get("APP_PORT", "8000")  # ✅ primary owns everything
 
-    # ✅ Dedicated scheduler backend (single worker, scheduler enabled)
-    # Use separate host/port so it can't collide with the API server.
-    scheduler_host = _normalize_bind_host(os.environ.get("SCHEDULER_HOST", backend_host))
-    scheduler_port = os.environ.get("SCHEDULER_PORT", "8001")
+    ui_host = _normalize_bind_host(os.environ.get("UI_HOST", backend_host))
+    ui_port = os.environ.get("UI_PORT", "8001")        # ✅ UI helper only
 
     dt_host = _normalize_bind_host(os.environ.get("DT_APP_HOST", "0.0.0.0"))
     dt_port = os.environ.get("DT_APP_PORT", "8010")
@@ -248,38 +212,21 @@ if __name__ == "__main__":
     replay_host = _normalize_bind_host(os.environ.get("REPLAY_APP_HOST", "0.0.0.0"))
     replay_port = os.environ.get("REPLAY_APP_PORT", "8020")
 
-    # Optional toggles
     UVICORN_LOG_LEVEL = os.environ.get("UVICORN_LOG_LEVEL", "warning").strip() or "warning"
     UVICORN_ACCESS_LOG = _env_bool("UVICORN_ACCESS_LOG", default=False)
     UVICORN_RELOAD = _env_bool("UVICORN_RELOAD", default=False)
 
-    # ----------------------------------------------------------------------------
-    # ✅ Worker plan (this is the "how you run it" baked into code)
-    #
-    # API/UI backend: workers=2, scheduler disabled
-    # Scheduler backend: workers=1, scheduler enabled
-    #
-    # Equivalent shell commands:
-    #   export AION_ROLE=api
-    #   export ENABLE_SCHEDULER=0
-    #   uvicorn backend.backend_service:app --host 0.0.0.0 --port 8000 --workers 2
-    #
-    #   export AION_ROLE=scheduler
-    #   export ENABLE_SCHEDULER=1
-    #   uvicorn backend.backend_service:app --host 0.0.0.0 --port 8001 --workers 1
-    # ----------------------------------------------------------------------------
-
-    # You can override workers in env, but defaults match the plan above.
-    BACKEND_WORKERS = _env_int("APP_WORKERS", 2)          # ✅ faster UI/API
-    SCHEDULER_WORKERS = _env_int("SCHEDULER_WORKERS", 1)  # ✅ single-owner scheduler
+    # ✅ Your exact requirement:
+    PRIMARY_WORKERS = 1
+    UI_WORKERS = _env_int("UI_WORKERS", 2)  # only for UI speed
 
     DT_WORKERS = _env_int("DT_APP_WORKERS", 1)
     REPLAY_WORKERS = _env_int("REPLAY_APP_WORKERS", 1)
 
     print("────────────────────────────────────────")
     print("🚀 Launching AION Analytics system")
-    print(f"   • backend API/UI    → http://{backend_host}:{backend_port} (workers={BACKEND_WORKERS}, ENABLE_SCHEDULER=0)")
-    print(f"   • backend scheduler → http://{scheduler_host}:{scheduler_port} (workers={SCHEDULER_WORKERS}, ENABLE_SCHEDULER=1)")
+    print(f"   • backend PRIMARY   → http://{backend_host}:{primary_port} (workers={PRIMARY_WORKERS}, owns scheduler/nightly/heartbeat)")
+    print(f"   • backend UI helper → http://{ui_host}:{ui_port} (workers={UI_WORKERS}, READ/FAST only)")
     print(f"   • dt_backend        → http://{dt_host}:{dt_port} (workers={DT_WORKERS})")
     print(f"   • replay_service    → http://{replay_host}:{replay_port} (dormant, workers={REPLAY_WORKERS})")
     if _should_silence_supervisor_agent():
@@ -289,43 +236,52 @@ if __name__ == "__main__":
     append_log("AION system starting")
     prune_old_logs()
 
-    # ✅ 1) Backend API/UI (2 workers, scheduler OFF)
-    backend_api_proc = launch(
+    # ✅ 1) PRIMARY backend (clean + single-owner)
+    backend_primary_proc = launch(
         uvicorn_cmd(
             "backend.backend_service:app",
             backend_host,
-            backend_port,
+            primary_port,
             log_level=UVICORN_LOG_LEVEL,
             access_log=UVICORN_ACCESS_LOG,
             reload=UVICORN_RELOAD,
-            workers=BACKEND_WORKERS,
+            workers=PRIMARY_WORKERS,
         ),
-        "backend_api",
+        "backend_primary",
         env_overrides={
-            "AION_ROLE": "api",
-            "ENABLE_SCHEDULER": "0",
+            "AION_ROLE": "primary",
+            "QUIET_STARTUP": "0",
+            "ENABLE_SCHEDULER": "1",
+            "ENABLE_HEARTBEAT": "1",
+            "ENABLE_CLOUDSYNC": "1",
+            # This is where UI-helper forwards heavy tasks
+            "PRIMARY_BACKEND_URL": f"http://127.0.0.1:{primary_port}",
         },
     )
-    threading.Thread(target=pipe_output, args=(backend_api_proc, "backend_api"), daemon=True).start()
+    threading.Thread(target=pipe_output, args=(backend_primary_proc, "backend_primary"), daemon=True).start()
 
-    # ✅ 2) Backend Scheduler (1 worker, scheduler ON)
-    backend_sched_proc = launch(
+    # ✅ 2) UI helper backend (2 workers, QUIET, NO background threads)
+    backend_ui_proc = launch(
         uvicorn_cmd(
             "backend.backend_service:app",
-            scheduler_host,
-            scheduler_port,
+            ui_host,
+            ui_port,
             log_level=UVICORN_LOG_LEVEL,
             access_log=UVICORN_ACCESS_LOG,
             reload=UVICORN_RELOAD,
-            workers=SCHEDULER_WORKERS,
+            workers=UI_WORKERS,
         ),
-        "backend_scheduler",
+        "backend_ui",
         env_overrides={
-            "AION_ROLE": "scheduler",
-            "ENABLE_SCHEDULER": "1",
+            "AION_ROLE": "ui",
+            "QUIET_STARTUP": "1",
+            "ENABLE_SCHEDULER": "0",
+            "ENABLE_HEARTBEAT": "0",
+            "ENABLE_CLOUDSYNC": "0",
+            "PRIMARY_BACKEND_URL": f"http://127.0.0.1:{primary_port}",
         },
     )
-    threading.Thread(target=pipe_output, args=(backend_sched_proc, "backend_scheduler"), daemon=True).start()
+    threading.Thread(target=pipe_output, args=(backend_ui_proc, "backend_ui"), daemon=True).start()
 
     # DT backend API
     dt_proc = launch(
@@ -350,11 +306,7 @@ if __name__ == "__main__":
     )
     dt_worker_name = "dt_scheduler" if dt_worker_module.endswith("dt_scheduler") else "dt_backend_live_loop"
     dt_worker_proc = launch([sys.executable, "-m", dt_worker_module], dt_worker_name)
-    threading.Thread(
-        target=pipe_output,
-        args=(dt_worker_proc, dt_worker_name),
-        daemon=True,
-    ).start()
+    threading.Thread(target=pipe_output, args=(dt_worker_proc, dt_worker_name), daemon=True).start()
 
     replay_proc = launch(
         uvicorn_cmd(
@@ -372,16 +324,15 @@ if __name__ == "__main__":
 
     try:
         while True:
-            if backend_api_proc.poll() is not None:
-                raise RuntimeError("backend API/UI process exited")
+            if backend_primary_proc.poll() is not None:
+                raise RuntimeError("backend PRIMARY process exited")
 
-            if backend_sched_proc.poll() is not None:
-                raise RuntimeError("backend scheduler process exited")
+            if backend_ui_proc.poll() is not None:
+                raise RuntimeError("backend UI helper process exited")
 
             if dt_proc.poll() is not None:
                 raise RuntimeError("dt_backend (API) process exited")
 
-            # DT worker is optional: if it dies, restart it instead of killing the whole stack.
             if dt_worker_proc.poll() is not None:
                 rc = dt_worker_proc.returncode
                 msg = f"[supervisor] ⚠️ {dt_worker_name} exited (code={rc}) — restarting…"
@@ -389,11 +340,8 @@ if __name__ == "__main__":
                 append_log(msg)
                 time.sleep(3)
                 dt_worker_proc = launch([sys.executable, "-m", dt_worker_module], dt_worker_name)
-                threading.Thread(
-                    target=pipe_output, args=(dt_worker_proc, dt_worker_name), daemon=True
-                ).start()
+                threading.Thread(target=pipe_output, args=(dt_worker_proc, dt_worker_name), daemon=True).start()
 
-            # replay_service is dormant/optional
             if replay_proc is not None and replay_proc.poll() is not None:
                 rc = replay_proc.returncode
                 msg = f"[supervisor] ⚠️ replay_service exited (code={rc}) — continuing without it"
@@ -411,9 +359,7 @@ if __name__ == "__main__":
         shutdown_process(replay_proc, "replay_service")
         shutdown_process(dt_worker_proc, dt_worker_name)
         shutdown_process(dt_proc, "dt_backend")
-
-        shutdown_process(backend_sched_proc, "backend_scheduler")
-        shutdown_process(backend_api_proc, "backend_api")
-
+        shutdown_process(backend_ui_proc, "backend_ui")
+        shutdown_process(backend_primary_proc, "backend_primary")
         time.sleep(2)
         append_log("AION system stopped")

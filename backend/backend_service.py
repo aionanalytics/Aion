@@ -1,16 +1,19 @@
-# backend/backend_service.py — v2.1.1 (worker-safe scheduler gating)
+# backend/backend_service.py — v2.1.2 (clean primary + quiet UI workers)
 """
 AION Analytics — Backend Service
 
-Responsibilities:
-    • Mount all FastAPI routers
-    • (Optional) Start scheduler + heartbeat in background threads
-    • Provide health & root diagnostic endpoints
+Goal
+----
+- Allow a "PRIMARY" backend (single worker) that owns scheduler/nightly/heartbeat.
+- Allow a "UI" backend (multi-worker) that only serves fast read endpoints (no background threads, no noisy startup).
 
-Important:
-    - If you run uvicorn with multiple workers, startup runs once per worker.
-    - Therefore the scheduler MUST be gated (or run as a separate single process),
-      otherwise you'll spawn multiple schedulers and overlap jobs.
+Key env flags
+-------------
+AION_ROLE: primary | ui (optional but recommended)
+QUIET_STARTUP: 1 to suppress startup banners + skip non-essential startup work
+ENABLE_SCHEDULER: 1 only on primary
+ENABLE_HEARTBEAT: 1 only on primary
+ENABLE_CLOUDSYNC: 1 only on primary
 """
 
 from __future__ import annotations
@@ -70,17 +73,25 @@ try:
 except Exception:
     cloud_sync = None
 
+
 # -------------------------------------------------
 # Feature gates (env controlled)
 # -------------------------------------------------
 
 def _env_flag(name: str, default: str = "0") -> bool:
-    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+    return (os.getenv(name, default) or "").strip().lower() in ("1", "true", "yes", "on")
 
-ENABLE_SCHEDULER = _env_flag("ENABLE_SCHEDULER", "0")      # must be OFF for multi-worker UI
-ENABLE_HEARTBEAT = _env_flag("ENABLE_HEARTBEAT", "1")      # harmless, but you can silence it
-ENABLE_CLOUDSYNC = _env_flag("ENABLE_CLOUDSYNC", "1")      # optional
-ROLE = os.getenv("AION_ROLE", "").strip().lower()          # optional: "api" or "scheduler"
+
+ROLE = (os.getenv("AION_ROLE", "") or "").strip().lower() or "unspecified"
+
+# QUIET_STARTUP is the big one: use it for the multi-worker UI backend so it doesn't spam logs
+QUIET_STARTUP = _env_flag("QUIET_STARTUP", "0")
+
+# Only PRIMARY should ever run these:
+ENABLE_SCHEDULER = _env_flag("ENABLE_SCHEDULER", "0")
+ENABLE_HEARTBEAT = _env_flag("ENABLE_HEARTBEAT", "1")
+ENABLE_CLOUDSYNC = _env_flag("ENABLE_CLOUDSYNC", "1")
+
 
 # -------------------------------------------------
 # FastAPI App Configuration
@@ -89,7 +100,7 @@ ROLE = os.getenv("AION_ROLE", "").strip().lower()          # optional: "api" or 
 app = FastAPI(
     title="AION Analytics Backend",
     description="Backend API + scheduler for AION Analytics.",
-    version="2.1.1",
+    version="2.1.2",
 )
 
 app.add_middleware(
@@ -139,10 +150,12 @@ for r in ROUTERS:
 async def root():
     return {
         "service": "AION Analytics Backend",
-        "version": "2.1.1",
+        "version": "2.1.2",
         "time": datetime.now(TIMEZONE).isoformat(),
-        "role": ROLE or "unspecified",
+        "role": ROLE,
+        "quiet_startup": QUIET_STARTUP,
         "enable_scheduler": ENABLE_SCHEDULER,
+        "enable_heartbeat": ENABLE_HEARTBEAT,
     }
 
 
@@ -151,7 +164,8 @@ async def health():
     return {
         "status": "ok",
         "time": datetime.now(TIMEZONE).isoformat(),
-        "role": ROLE or "unspecified",
+        "role": ROLE,
+        "quiet_startup": QUIET_STARTUP,
         "enable_scheduler": ENABLE_SCHEDULER,
     }
 
@@ -183,7 +197,8 @@ def _print_root_path():
     ensure_project_structure()
     try:
         root = PATHS.get("root")
-        print(f"[Backend] 📦 Root path: {root}", flush=True)
+        if root:
+            print(f"[Backend] 📦 Root path: {root}", flush=True)
     except Exception:
         pass
 
@@ -193,47 +208,52 @@ def _print_root_path():
 
 @app.on_event("startup")
 async def on_startup():
-    print("────────────────────────────────────────", flush=True)
-    print("🚀 AION Analytics Backend — Starting…", flush=True)
-    print("────────────────────────────────────────", flush=True)
+    # In multi-worker "UI" mode, do not spam banners and do not start any background threads.
+    if not QUIET_STARTUP:
+        print("────────────────────────────────────────", flush=True)
+        print("🚀 AION Analytics Backend — Starting…", flush=True)
+        print("────────────────────────────────────────", flush=True)
+        _print_root_path()
 
-    _print_root_path()
+    # IMPORTANT:
+    # Bot bootstrap writes files. If you run it in 2 workers you can race and get noise.
+    # So: only do it when NOT quiet.
+    if not QUIET_STARTUP:
+        try:
+            from backend.services.bot_bootstrapper import bootstrap_bots_for_ui  # type: ignore
+            bootstrap_bots_for_ui()
+            print("[Backend] 🤖 Bot UI bootstrap complete.", flush=True)
+        except Exception as e:
+            print(f"[Backend] ⚠️ Bot UI bootstrap skipped: {e}", flush=True)
 
-    # Make the Bots UI deterministic on fresh starts
-    try:
-        from backend.services.bot_bootstrapper import bootstrap_bots_for_ui  # type: ignore
-        bootstrap_bots_for_ui()
-        print("[Backend] 🤖 Bot UI bootstrap complete.", flush=True)
-    except Exception as e:
-        print(f"[Backend] ⚠️ Bot UI bootstrap skipped: {e}", flush=True)
-
-    # Optional cloud sync (usually fine in API process; if you want, gate it too)
-    if cloud_sync and ENABLE_CLOUDSYNC:
+    # Cloud sync: only in primary / non-quiet
+    if cloud_sync and ENABLE_CLOUDSYNC and not QUIET_STARTUP:
         try:
             print("[CloudSync] ☁️ Starting background sync tasks…", flush=True)
             cloud_sync.start_background_tasks()
         except Exception as e:
             print(f"[CloudSync] ⚠️ Cloud sync init failed: {e}", flush=True)
 
-    # Heartbeat
-    if ENABLE_HEARTBEAT:
+    # Heartbeat: only in primary / non-quiet
+    if ENABLE_HEARTBEAT and not QUIET_STARTUP:
         threading.Thread(target=_backend_heartbeat, daemon=True).start()
 
-    # Scheduler (MUST be gated or you will duplicate it under --workers > 1)
-    if ENABLE_SCHEDULER:
+    # Scheduler: MUST be gated (primary only)
+    if ENABLE_SCHEDULER and not QUIET_STARTUP:
         threading.Thread(target=_scheduler_thread, daemon=True).start()
         print("[Backend] 🧭 Scheduler thread enabled.", flush=True)
-    else:
+    elif not QUIET_STARTUP:
         print("[Backend] 🧭 Scheduler thread disabled.", flush=True)
 
-    print("[Backend] ✅ Startup complete — ready for requests.", flush=True)
+    if not QUIET_STARTUP:
+        print("[Backend] ✅ Startup complete — ready for requests.", flush=True)
 
 # -------------------------------------------------
-# CLI Entrypoint
+# CLI Entrypoint (dev only)
 # -------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
 
-    print("[Backend] Running at http://127.0.0.1:8000", flush=True)
+    # Dev only: reload=True is fine locally, but do NOT use reload with multi-worker plans.
     uvicorn.run("backend.backend_service:app", host="127.0.0.1", port=8000, reload=True)
