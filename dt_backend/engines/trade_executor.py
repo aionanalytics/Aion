@@ -32,7 +32,7 @@ try:
 except Exception:  # pragma: no cover
     read_dt_state = None  # type: ignore
 
-from dt_backend.engines.broker_api import BrokerAPI, Order
+from dt_backend.engines.broker_api import BrokerAPI, Order, get_positions_scoped
 from dt_backend.services.position_manager_dt import (
     process_exits,
     record_entry,
@@ -81,6 +81,108 @@ class ExecutionConfig:
     scratch_atr_frac: float = 0.15
 
 
+
+
+def _env(name: str, default: str = "") -> str:
+    import os
+    return (os.getenv(name, default) or "").strip()
+
+
+def _env_bool(name: str, default: str = "0") -> bool:
+    v = _env(name, default)
+    return v.lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _cfg_from_env() -> ExecutionConfig:
+    cfg = ExecutionConfig()
+    cfg.dry_run = _env_bool("DT_DRY_RUN", "1")
+    cfg.max_orders_per_cycle = int(_safe_float(_env("DT_MAX_ORDERS_PER_CYCLE", str(cfg.max_orders_per_cycle)), cfg.max_orders_per_cycle))
+    cfg.allow_shorts = _env_bool("DT_ALLOW_SHORTS", "0")
+    # allow both legacy and new knob names
+    mc = _env("DT_EXEC_MIN_CONF", _env("DT_MIN_CONFIDENCE", str(cfg.min_confidence)))
+    cfg.min_confidence = float(_safe_float(mc, cfg.min_confidence))
+    dq = _env("DT_EXEC_DEFAULT_QTY", str(cfg.default_qty))
+    cfg.default_qty = float(_safe_float(dq, cfg.default_qty))
+    return cfg
+
+
+def _liquidation_settings() -> Dict[str, Any]:
+    return {
+        "enabled": _env_bool("DT_LIQUIDATE_ENABLED", "0"),
+        "target_positions": int(_safe_float(_env("DT_LIQUIDATE_TARGET_POSITIONS", "-1"), -1)),
+        "scope": _env("DT_LIQUIDATE_SCOPE", "ALL").upper(),  # ACTIVE|CARRY|ALL
+        "max_orders": int(_safe_float(_env("DT_LIQUIDATE_MAX_ORDERS_PER_CYCLE", "25"), 25)),
+    }
+
+
+def _run_liquidation_if_enabled(broker: BrokerAPI, cfg: ExecutionConfig) -> Dict[str, Any]:
+    """If liquidation is enabled, sell down positions to target count.
+
+    This runs even during stand_down. It is capped per cycle.
+    """
+    s = _liquidation_settings()
+    if not s["enabled"]:
+        return {"status": "disabled"}
+
+    scope = str(s["scope"] or "ALL").upper()
+    target = int(s["target_positions"])
+    max_orders = int(s["max_orders"])
+
+    # Pull positions from the requested scope (ledger view).
+    pos = get_positions_scoped(scope)
+    syms = sorted([k for k, p in pos.items() if isinstance(p, object) and float(getattr(p, "qty", 0.0)) != 0.0])
+
+    keep = set()
+    if target >= 0:
+        keep = set(syms[:target])
+
+    to_sell = [sym for sym in syms if sym not in keep]
+
+    sent = 0
+    for sym in to_sell:
+        if sent >= max_orders:
+            break
+        p = pos.get(sym)
+        qty = float(getattr(p, "qty", 0.0)) if p else 0.0
+        if qty == 0.0:
+            continue
+        side = "SELL" if qty > 0 else "BUY"  # cover shorts if any
+        order = Order(symbol=sym, side=side, qty=abs(qty), limit_price=None)
+        append_trade_event(
+            {
+                "type": "liquidate_intent",
+                "symbol": sym,
+                "side": side,
+                "qty": abs(qty),
+                "scope": scope,
+                "target_positions": target,
+            }
+        )
+        if cfg.dry_run:
+            sent += 1
+            continue
+        res = broker.submit_order(order, last_price=None)
+        append_trade_event(
+            {
+                "type": "liquidate_order",
+                "symbol": sym,
+                "side": side,
+                "qty": abs(qty),
+                "result": res,
+                "scope": scope,
+            }
+        )
+        sent += 1
+
+    return {
+        "status": "ok",
+        "enabled": True,
+        "scope": scope,
+        "target_positions": target,
+        "positions_seen": len(syms),
+        "orders_sent": sent,
+        "orders_cap": max_orders,
+    }
 def _safe_float(x: Any, default: float = 0.0) -> float:
     try:
         return float(x)
@@ -240,13 +342,16 @@ def execute_from_policy(
 
     Returns a summary dict.
     """
-    cfg = cfg or ExecutionConfig()
+    cfg = _cfg_from_env() if cfg is None else cfg
     rolling = _read_rolling() or {}
     if not isinstance(rolling, dict) or not rolling:
         log("[dt_exec] ⚠️ rolling empty; nothing to execute")
         return {"status": "empty", "orders": 0, "dry_run": cfg.dry_run}
 
     broker = BrokerAPI()
+
+    # Emergency / operator-controlled liquidation (sell down to target positions).
+    liquidation_summary = _run_liquidation_if_enabled(broker, cfg)
 
     # Replay/backtest can drive time via DT_NOW_UTC; fall back to real time.
     ts_now = now_utc or _now_utc_override()
@@ -476,6 +581,7 @@ def execute_from_policy(
         "blocked": int(blocked),
         "dry_run": bool(cfg.dry_run),
         "symbols": len(sym_list),
+        "liquidation": liquidation_summary,
         "exits": {
             "evaluated": int(exit_summary.evaluated),
             "partials_sent": int(exit_summary.partials_sent),

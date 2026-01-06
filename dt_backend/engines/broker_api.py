@@ -169,7 +169,10 @@ def _default_ledger() -> Dict[str, Any]:
     return {
         "bot_id": _bot_id(),
         "cash": float(cap),
-        "positions": {},   # { "AAPL": {"qty": 10, "avg_price": 180.0} }
+        "positions": {
+            "ACTIVE": {},  # strategy-managed positions
+            "CARRY": {},   # imported/manual legacy holdings
+        },
         "fills": [],       # list of fill dicts
         "meta": {
             "created_at": now,
@@ -180,6 +183,52 @@ def _default_ledger() -> Dict[str, Any]:
     }
 
 
+
+
+def _ensure_positions_schema(state: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Ensure ledger positions use the bucketed schema.
+
+    Supported on disk:
+      - legacy flat dict: {"AAPL": {qty, avg_price}, ...}
+      - bucketed dict: {"ACTIVE": {...}, "CARRY": {...}}
+
+    Returns the bucket dict (ACTIVE/CARRY), mutating state in-place.
+    """
+    raw = state.get("positions")
+    if not isinstance(raw, dict):
+        raw = {}
+
+    # Already bucketed?
+    if "ACTIVE" in raw or "CARRY" in raw:
+        active = raw.get("ACTIVE")
+        carry = raw.get("CARRY")
+        if not isinstance(active, dict):
+            active = {}
+        if not isinstance(carry, dict):
+            carry = {}
+        state["positions"] = {"ACTIVE": active, "CARRY": carry}
+        return state["positions"]
+
+    # Legacy flat dict -> ACTIVE bucket
+    legacy = raw if isinstance(raw, dict) else {}
+    state["positions"] = {"ACTIVE": legacy, "CARRY": {}}
+    return state["positions"]
+
+
+def _positions_view(state: Dict[str, Any], scope: str) -> Dict[str, Any]:
+    buckets = _ensure_positions_schema(state)
+    scope = (scope or "ACTIVE").strip().upper()
+    if scope == "ALL":
+        out: Dict[str, Any] = {}
+        for b in ("ACTIVE", "CARRY"):
+            part = buckets.get(b, {})
+            if isinstance(part, dict):
+                out.update(part)
+        return out
+    if scope == "CARRY":
+        return buckets.get("CARRY", {}) if isinstance(buckets.get("CARRY"), dict) else {}
+    # default ACTIVE
+    return buckets.get("ACTIVE", {}) if isinstance(buckets.get("ACTIVE"), dict) else {}
 def _read_ledger() -> Dict[str, Any]:
     if not LEDGER_PATH.exists():
         return _default_ledger()
@@ -204,6 +253,7 @@ def _read_ledger() -> Dict[str, Any]:
 
         if not isinstance(data.get("positions"), dict):
             data["positions"] = {}
+        _ensure_positions_schema(data)
         if not isinstance(data.get("fills"), list):
             data["fills"] = []
 
@@ -259,6 +309,103 @@ def _alpaca_headers() -> Dict[str, str]:
     }
 
 
+
+
+def _alpaca_get(path: str) -> Any:
+    """GET helper for Alpaca v2 endpoints. Returns parsed JSON or raises."""
+    base = _alpaca_base_v2()
+    url = base + path
+    req = urllib.request.Request(url, headers=_alpaca_headers(), method="GET")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        raw = resp.read().decode("utf-8", errors="ignore")
+    return json.loads(raw) if raw else None
+
+
+def _alpaca_account_cash() -> float:
+    try:
+        acct = _alpaca_get("/account")
+        if isinstance(acct, dict):
+            return _safe_float(acct.get("cash"), 0.0)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _alpaca_positions() -> Dict[str, Position]:
+    """Return account-level Alpaca positions as Position objects."""
+    out: Dict[str, Position] = {}
+    try:
+        items = _alpaca_get("/positions")
+        if not isinstance(items, list):
+            return out
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            sym = str(it.get("symbol") or "").upper().strip()
+            if not sym:
+                continue
+            qty = _safe_float(it.get("qty"), 0.0)
+            avg = _safe_float(it.get("avg_entry_price"), _safe_float(it.get("avg_price"), 0.0))
+            if qty != 0:
+                out[sym] = Position(symbol=sym, qty=qty, avg_price=avg)
+    except Exception as e:
+        log(f"[alpaca] ⚠️ positions fetch failed: {e}")
+    return out
+
+
+def reconcile_ledger_from_broker(
+    *,
+    mode: str = "IMPORT",
+    sync_cash: bool = False,
+    allow_when_disabled: bool = False,
+) -> Dict[str, Any]:
+    """One-time reconcile of local ledger from broker positions.
+
+    Modes:
+      - IMPORT: replace ACTIVE bucket with broker positions (keeps CARRY as-is)
+      - CLEAR_IF_FLAT: if broker has 0 positions, clear ACTIVE
+      - STRICT: replace ACTIVE with broker positions AND clear CARRY
+    """
+    mode = (mode or "IMPORT").strip().upper()
+    if not _alpaca_enabled() and not allow_when_disabled:
+        return {"status": "skipped", "reason": "alpaca_disabled"}
+
+    state = _read_ledger()
+    buckets = _ensure_positions_schema(state)
+
+    broker_pos = _alpaca_positions() if _alpaca_enabled() else {}
+    broker_syms = sorted(broker_pos.keys())
+
+    if mode == "CLEAR_IF_FLAT" and len(broker_syms) == 0:
+        buckets["ACTIVE"] = {}
+        state["positions"] = buckets
+        _save_ledger(state)
+        return {"status": "ok", "mode": mode, "active": 0, "carry": len(_positions_view(state, "CARRY"))}
+
+    active_new: Dict[str, Any] = {}
+    for sym, p in broker_pos.items():
+        active_new[sym] = {"qty": float(p.qty), "avg_price": float(p.avg_price)}
+    buckets["ACTIVE"] = active_new
+
+    if mode == "STRICT":
+        buckets["CARRY"] = {}
+
+    state["positions"] = buckets
+
+    if sync_cash:
+        c = _alpaca_account_cash()
+        if c > 0:
+            state["cash"] = float(c)
+
+    _save_ledger(state)
+    return {
+        "status": "ok",
+        "mode": mode,
+        "broker_positions": len(broker_syms),
+        "active": len(active_new),
+        "carry": len(_positions_view(state, "CARRY")),
+        "synced_cash": bool(sync_cash),
+    }
 def _http_json(method: str, path: str, payload: Dict[str, Any] | None = None, timeout: float = 15.0) -> Any:
     url = _alpaca_base_v2() + path
     data = None
@@ -343,7 +490,8 @@ def _cancel_order(order_id: str) -> None:
 
 def get_positions() -> Dict[str, Position]:
     state = _read_ledger()
-    positions_raw = state.get("positions") or {}
+    scope = _env("DT_LEDGER_READ_SCOPE", "ACTIVE").upper()  # ACTIVE|CARRY|ALL
+    positions_raw = _positions_view(state, scope)
     out: Dict[str, Position] = {}
     if not isinstance(positions_raw, dict):
         return out
@@ -356,6 +504,24 @@ def get_positions() -> Dict[str, Position]:
         if sym2 and qty != 0:
             out[sym2] = Position(symbol=sym2, qty=qty, avg_price=avg)
     return out
+
+
+def get_positions_scoped(scope: str) -> Dict[str, Position]:
+    state = _read_ledger()
+    positions_raw = _positions_view(state, scope)
+    out: Dict[str, Position] = {}
+    if not isinstance(positions_raw, dict):
+        return out
+    for sym, node in positions_raw.items():
+        if not isinstance(node, dict):
+            continue
+        qty = _safe_float(node.get("qty", 0.0), 0.0)
+        avg = _safe_float(node.get("avg_price", 0.0), 0.0)
+        sym2 = str(sym).upper().strip()
+        if sym2 and qty != 0:
+            out[sym2] = Position(symbol=sym2, qty=qty, avg_price=avg)
+    return out
+
 
 
 def get_cash() -> float:
@@ -377,9 +543,11 @@ def get_ledger_state() -> Dict[str, Any]:
 # =========================
 
 def _ledger_apply_fill(state: Dict[str, Any], sym: str, side: str, filled_qty: float, fill_price: float) -> Dict[str, Any]:
-    positions = state.get("positions") or {}
+    buckets = _ensure_positions_schema(state)
+    positions = buckets.get("ACTIVE", {})
     if not isinstance(positions, dict):
         positions = {}
+        buckets["ACTIVE"] = positions
     fills = state.get("fills") or []
     if not isinstance(fills, list):
         fills = []
@@ -596,12 +764,26 @@ def submit_order(order: Order, last_price: float | None = None) -> Dict[str, Any
     }
 
 
-class BrokerAPI:
-    """Thin wrapper around the module-level broker functions.
 
-    This exists for compatibility with executors that were written against a
-    class-based interface.
-    """
+
+_RECONCILE_DONE: bool = False
+class BrokerAPI:
+    """Thin wrapper around the module-level broker functions + optional reconciliation."""
+
+    def __init__(self) -> None:
+        global _RECONCILE_DONE
+        if _RECONCILE_DONE:
+            return
+
+        if _env("DT_LEDGER_RECONCILE_ON_STARTUP", "0") in {"1", "true", "TRUE", "yes", "YES"}:
+            mode = _env("DT_LEDGER_RECONCILE_MODE", "IMPORT")
+            sync_cash = _env("DT_LEDGER_RECONCILE_SYNC_CASH", "0") in {"1", "true", "TRUE", "yes", "YES"}
+            try:
+                res = reconcile_ledger_from_broker(mode=mode, sync_cash=sync_cash)
+                log(f"[broker_ledger] 🔄 reconcile_on_startup: {res}")
+            except Exception as e:
+                log(f"[broker_ledger] ⚠️ reconcile_on_startup failed: {e}")
+        _RECONCILE_DONE = True
 
     def get_cash(self) -> float:
         return get_cash()
