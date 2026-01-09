@@ -68,7 +68,6 @@ def _default_path() -> Path:
         return Path(dt_truth) / "intraday" / "positions" / "position_registry.json"
 
     # Fall back to a stable path under da_brains if present.
-    # We don't import DT_PATHS here to keep this module dependency-light.
     return Path("da_brains") / "shared" / "positions" / "position_registry.json"
 
 
@@ -114,21 +113,21 @@ def save_registry(reg: Registry) -> None:
 
 def get_reserved_qty(reg: Registry, symbol: str, owner: str) -> float:
     sym = (symbol or "").upper().strip()
-    owner = (owner or "").upper().strip() or "DT"
+    owner2 = (owner or "").upper().strip() or "DT"
     node = reg.data.get("symbols", {}).get(sym)
     if not isinstance(node, dict):
         return 0.0
     reserved = node.get("reserved")
     if not isinstance(reserved, dict):
         return 0.0
-    return _safe_float(reserved.get(owner), 0.0)
+    return _safe_float(reserved.get(owner2), 0.0)
 
 
 def set_reserved_qty(reg: Registry, symbol: str, owner: str, qty: float) -> None:
     sym = (symbol or "").upper().strip()
     if not sym:
         return
-    owner = (owner or "").upper().strip() or "DT"
+    owner2 = (owner or "").upper().strip() or "DT"
 
     reg.data.setdefault("symbols", {})
     symbols = reg.data["symbols"]
@@ -140,7 +139,8 @@ def set_reserved_qty(reg: Registry, symbol: str, owner: str, qty: float) -> None
     reserved = node.get("reserved")
     if not isinstance(reserved, dict):
         reserved = {}
-    reserved[owner] = float(max(0.0, qty))
+
+    reserved[owner2] = float(max(0.0, qty))
     node["reserved"] = reserved
     node.setdefault("alpaca_qty", None)
     node["ts"] = _utc_iso()
@@ -168,6 +168,7 @@ def set_alpaca_qty(reg: Registry, symbol: str, qty: Optional[float]) -> None:
     sym = (symbol or "").upper().strip()
     if not sym:
         return
+
     reg.data.setdefault("symbols", {})
     symbols = reg.data["symbols"]
     node = symbols.get(sym)
@@ -189,11 +190,10 @@ def recompute_mismatch(reg: Registry, symbol: Optional[str] = None) -> None:
         a = node.get("alpaca_qty")
         alp = None if a is None else _safe_float(a, 0.0)
         tot = reserved_total(reg, sym)
-        mismatch = False
         if alp is None:
             mismatch = False  # unknown broker qty shouldn't auto-kill
         else:
-            mismatch = tot - alp > 1e-9
+            mismatch = (tot - alp) > 1e-9
         node["mismatch"] = bool(mismatch)
         node["reserved_total"] = float(tot)
         node["ts"] = _utc_iso()
@@ -209,16 +209,77 @@ def any_mismatch(reg: Registry) -> bool:
     return False
 
 
+# =========================
+# Public safety helpers used by broker/execution layers
+# =========================
+
+
+def can_sell_qty(reg: Registry, symbol: str, owner: str) -> float:
+    """How much this strategy is allowed to SELL for symbol.
+
+    Primary clamp is simply the strategy's reserved qty.
+
+    If we have broker qty (alpaca_qty) and the registry is "over-reserved"
+    (reserved_total > alpaca_qty), we clamp further so total sells across
+    strategies cannot exceed broker truth.
+    """
+    sym = (symbol or "").upper().strip()
+    owner2 = (owner or "").upper().strip() or "DT"
+
+    owner_reserved = get_reserved_qty(reg, sym, owner2)
+    if owner_reserved <= 0:
+        return 0.0
+
+    node = reg.data.get("symbols", {}).get(sym)
+    if not isinstance(node, dict):
+        return float(owner_reserved)
+
+    a = node.get("alpaca_qty")
+    alp = None if a is None else _safe_float(a, 0.0)
+    if alp is None:
+        return float(owner_reserved)
+
+    tot = reserved_total(reg, sym)
+    # How much of the broker qty is NOT reserved by other owners?
+    other_reserved = max(0.0, float(tot) - float(owner_reserved))
+    max_owner_by_broker = max(0.0, float(alp) - other_reserved)
+    return float(max(0.0, min(float(owner_reserved), float(max_owner_by_broker))))
+
+
+def reserve_on_fill(reg: Registry, symbol: str, side: str, filled_qty: float, owner: str) -> Registry:
+    """Apply a known fill to the registry.
+
+    BUY  -> increase reserved qty for owner
+    SELL -> decrease reserved qty for owner
+    """
+    sym = (symbol or "").upper().strip()
+    owner2 = (owner or "").upper().strip() or "DT"
+    side2 = (side or "").upper().strip()
+    q = max(0.0, _safe_float(filled_qty, 0.0))
+
+    if not sym or q <= 0:
+        return reg
+
+    if side2 == "BUY":
+        add_reserved_qty(reg, sym, owner2, q)
+    elif side2 == "SELL":
+        add_reserved_qty(reg, sym, owner2, -q)
+
+    # Recompute mismatch for the touched symbol (cheap)
+    recompute_mismatch(reg, sym)
+    return reg
+
+
 def reconcile_with_alpaca_positions(reg: Registry, alpaca_positions: Dict[str, float]) -> Dict[str, Any]:
     """Update alpaca_qty snapshot and recompute mismatches.
 
     alpaca_positions: {"AAPL": 15.0, ...}
 
-    Returns a summary with mismatch_count.
+    Returns a summary with mismatch_count and mismatch_symbols.
     """
     seen = 0
-    for sym, qty in alpaca_positions.items():
-        set_alpaca_qty(reg, sym, float(qty))
+    for sym, qty in (alpaca_positions or {}).items():
+        set_alpaca_qty(reg, sym, float(_safe_float(qty, 0.0)))
         seen += 1
 
     # Also mark symbols that exist in registry but not in broker as zero.
@@ -229,59 +290,20 @@ def reconcile_with_alpaca_positions(reg: Registry, alpaca_positions: Dict[str, f
                 set_alpaca_qty(reg, sym, 0.0)
 
     recompute_mismatch(reg)
+
     mismatches = 0
+    mismatch_syms: list[str] = []
     if isinstance(reg.data.get("symbols"), dict):
-        for _, node in reg.data["symbols"].items():
+        for s, node in reg.data["symbols"].items():
             if isinstance(node, dict) and bool(node.get("mismatch")):
                 mismatches += 1
+                mismatch_syms.append(str(s))
 
     save_registry(reg)
     return {
         "status": "ok",
         "seen": int(seen),
         "mismatch_count": int(mismatches),
+        "mismatch_symbols": mismatch_syms,
         "ts": _utc_iso(),
     }
-
-
-def can_sell_qty(reg: Registry, symbol: str, owner: str) -> float:
-    """Return how many shares a strategy is allowed to sell for a symbol.
-
-    Conservative rule: a strategy may only sell what it has reserved.
-    If alpaca_qty is known, clamp to broker qty too.
-    """
-    sym = (symbol or "").upper().strip()
-    owner = (owner or "").upper().strip() or "DT"
-    if not sym:
-        return 0.0
-
-    allowed = get_reserved_qty(reg, sym, owner)
-
-    node = reg.data.get("symbols", {}).get(sym)
-    if isinstance(node, dict):
-        a = node.get("alpaca_qty")
-        if a is not None:
-            allowed = min(float(allowed), _safe_float(a, 0.0))
-
-    return max(0.0, float(allowed))
-
-
-def reserve_on_fill(reg: Registry, symbol: str, side: str, qty: float, owner: str) -> Registry:
-    """Update reserved quantities after a known fill.
-
-    BUY  -> increase owner's reserved qty
-    SELL -> decrease owner's reserved qty
-    """
-    sym = (symbol or "").upper().strip()
-    side = (side or "").upper().strip()
-    owner = (owner or "").upper().strip() or "DT"
-    q = _safe_float(qty, 0.0)
-    if not sym or q <= 0:
-        return reg
-
-    if side == "BUY":
-        add_reserved_qty(reg, sym, owner, +q)
-    elif side == "SELL":
-        add_reserved_qty(reg, sym, owner, -q)
-
-    return reg
