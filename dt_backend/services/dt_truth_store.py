@@ -391,7 +391,7 @@ def write_metrics_snapshot(*, rolling: Optional[Dict[str, Any]] = None) -> Dict[
 
             bot_id = str(raw.get("bot_id") or p.stem.replace("bot_", ""))
             cash = float(raw.get("cash") or 0.0)
-            positions = raw.get("positions") or {}
+            positions = _positions_bucket_view(raw.get("positions") or {})
             fills = raw.get("fills") or []
 
             realized = 0.0
@@ -466,3 +466,30 @@ def bump_metric(name: str, amount: float = 1.0) -> None:
     m["counters"] = counters
     m["ts"] = _utc_iso()
     atomic_write_json(metrics_path(), m)
+def _positions_bucket_view(positions: Any) -> Dict[str, Any]:
+    """Normalize ledger positions to a flat {SYMBOL: {qty, avg_price}} dict.
+
+    Supports both:
+      - legacy flat dict: {"AAPL": {"qty":..,"avg_price":..}, ...}
+      - bucketed schema: {"ACTIVE": {...}, "CARRY": {...}}
+
+    Uses DT_LEDGER_READ_SCOPE to select ACTIVE/CARRY/ALL (default ACTIVE).
+    """
+    if not isinstance(positions, dict):
+        return {}
+    # Bucketed?
+    if "ACTIVE" in positions or "CARRY" in positions:
+        scope = (os.getenv("DT_LEDGER_READ_SCOPE", "ACTIVE") or "ACTIVE").strip().upper()
+        active = positions.get("ACTIVE") if isinstance(positions.get("ACTIVE"), dict) else {}
+        carry = positions.get("CARRY") if isinstance(positions.get("CARRY"), dict) else {}
+        if scope == "ALL":
+            out = dict(active)
+            out.update(carry)
+            return out
+        if scope == "CARRY":
+            return dict(carry)
+        return dict(active)
+    # Legacy flat
+    return dict(positions)
+
+

@@ -1,69 +1,48 @@
-# dt_backend/engines/broker_api.py — v2.2
-"""
-Abstract broker API for AION dt_backend.
+# dt_backend/engines/broker_api.py — v2.3
+"""Abstract broker API for AION dt_backend.
 
-v2.2 — Alpaca PAPER execution + local per-bot allowance ledger
---------------------------------------------------------------
-Goals:
-  ✅ Keep *per-bot* cash + positions locally (so one bot can't spend the whole Alpaca account)
-  ✅ Still place real PAPER orders on Alpaca (https://paper-api.alpaca.markets/v2)
-  ✅ Same public interface used by the engine:
-        - get_cash() -> float
-        - get_positions() -> Dict[str, Position]
-        - submit_order(order: Order, last_price: float | None = None) -> Dict[str, Any]
+Design summary
+--------------
+- Strategy-level source of truth is a *local per-bot ledger* (cash/positions/fills)
+  so one bot can't spend the whole broker account.
+- Orders can still route to Alpaca paper (account-level) when API keys exist.
 
-How it works:
-  • Each bot process identifies itself via env var DT_BOT_ID (default: "default").
-  • Each bot has a local ledger JSON (cash/positions/fills) under:
-        <DT_PATHS["da_brains"]>/intraday/brokers/bot_<DT_BOT_ID>.json
-    (or DT_BOT_LEDGER_PATH override env var)
+v2.3 — Broker equity/PnL cache (for risk rails)
+----------------------------------------------
+Adds an account snapshot cache (TTL default 180s) so other components (notably
+risk_rails_dt) can use broker-reported equity/PnL instead of only local ledger
+estimates.
 
-  • get_cash/get_positions read ONLY the local ledger.
-  • submit_order:
-      1) checks allowance (ledger cash / ledger positions)
-      2) submits order to Alpaca paper (if keys exist)
-      3) polls briefly for fills
-      4) updates local ledger from the filled quantity + price
-      5) (optional) cancels remaining if partial/unfilled
-
-Allowances:
-  • Set DT_BOT_CASH_CAP to seed/reset initial cash if the ledger is missing.
-    Example: DT_BOT_CASH_CAP=2500  (per-bot "allowance")
-  • You can top-up by editing the ledger file or writing an admin endpoint later.
-
-Important:
-  • Alpaca positions are *account-level*; this ledger is the strategy-level source of truth.
-  • Best practice: avoid multiple bots trading the same symbol simultaneously unless you add symbol ownership/netting.
-
-Secrets:
-  • Uses ROOT admin_keys.py (env-only) for Alpaca keys/base URL.
+Public additions:
+- get_account_cached(ttl_sec=180) -> dict
+- get_equity_cached(ttl_sec=180) -> float
+- BrokerAPI.get_account_cached(ttl_sec=180)
 
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, Any
 from datetime import datetime, timezone
-import os
+from pathlib import Path
+from typing import Any, Dict
 import json
+import os
 import time
 import uuid
 import urllib.request
 import urllib.error
 
 from dt_backend.core import DT_PATHS, log
-from dt_backend.core.time_override_dt import utc_iso, now_utc
+from dt_backend.core.time_override_dt import utc_iso
 
-# ---------------------------------------------------------------------------
-# Public interface (compat)
-# ---------------------------------------------------------------------------
-#
-# Some older / external modules expect a BrokerAPI class with methods.
-# This file originally provided free functions (get_cash/get_positions/submit_order).
-# To keep the system stable, we provide a small wrapper class that delegates to
-# the existing functions.
+from dt_backend.core.position_registry import (
+    load_registry,
+    save_registry,
+    reconcile_with_alpaca_positions,
+    can_sell_qty,
+    reserve_on_fill,
+)
 
 # ROOT secrets (env-only)
 try:
@@ -71,7 +50,7 @@ try:
         ALPACA_API_KEY_ID,
         ALPACA_API_SECRET_KEY,
         ALPACA_PAPER_BASE_URL,
-        # legacy aliases (in case other code expects them)
+        # legacy aliases
         ALPACA_KEY,
         ALPACA_SECRET,
     )
@@ -87,6 +66,7 @@ except Exception:
 # Models
 # =========================
 
+
 @dataclass
 class Position:
     symbol: str
@@ -97,7 +77,7 @@ class Position:
 @dataclass
 class Order:
     symbol: str
-    side: str           # "BUY" or "SELL"
+    side: str  # "BUY" or "SELL"
     qty: float
     limit_price: float | None = None
 
@@ -105,6 +85,7 @@ class Order:
 # =========================
 # Helpers
 # =========================
+
 
 def _utc_now_iso() -> str:
     # Replay/backtest can drive time via DT_NOW_UTC.
@@ -115,7 +96,7 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
     try:
         return float(x)
     except Exception:
-        return default
+        return float(default)
 
 
 def _env(name: str, default: str = "") -> str:
@@ -126,10 +107,22 @@ def _env(name: str, default: str = "") -> str:
 # Bot identity + ledger path
 # =========================
 
+
 def _bot_id() -> str:
     bid = _env("DT_BOT_ID", "default")
     bid = "".join(c for c in bid if c.isalnum() or c in ("_", "-", "."))
     return bid or "default"
+
+
+def _strategy_owner() -> str:
+    """Strategy ownership tag written into the shared registry.
+
+    DT should use 'DT'. Swing should use 'SWING' (or 'SW'), etc.
+    """
+    tag = _env("AION_STRATEGY_TAG", "") or _env("DT_STRATEGY_TAG", "") or "DT"
+    tag = "".join(c for c in tag.upper() if c.isalnum() or c in {"_", "-"})
+    return tag or "DT"
+
 
 
 def _resolve_ledger_path() -> Path:
@@ -147,16 +140,22 @@ def _resolve_ledger_path() -> Path:
 
 LEDGER_PATH: Path = _resolve_ledger_path()
 
-# Backward-compat alias (older code imports PAPER_STATE_PATH)
-# In v2.2 this points at the per-bot ledger for the current DT_BOT_ID.
+# Backward-compat alias
 PAPER_STATE_PATH: Path = LEDGER_PATH
 
 
+def _alpaca_keys() -> tuple[str, str]:
+    key = (ALPACA_API_KEY_ID or ALPACA_KEY or "").strip()
+    secret = (ALPACA_API_SECRET_KEY or ALPACA_SECRET or "").strip()
+    return key, secret
+
+
+def _alpaca_enabled() -> bool:
+    k, s = _alpaca_keys()
+    return bool(k and s)
+
+
 def _starting_cash_cap() -> float:
-    """
-    Seeds initial cash if ledger doesn't exist.
-    Defaults to 100k if DT_BOT_CASH_CAP not provided.
-    """
     cap = _env("DT_BOT_CASH_CAP", "")
     if cap:
         return max(0.0, _safe_float(cap, 0.0))
@@ -170,10 +169,10 @@ def _default_ledger() -> Dict[str, Any]:
         "bot_id": _bot_id(),
         "cash": float(cap),
         "positions": {
-            "ACTIVE": {},  # strategy-managed positions
-            "CARRY": {},   # imported/manual legacy holdings
+            "ACTIVE": {},
+            "CARRY": {},
         },
-        "fills": [],       # list of fill dicts
+        "fills": [],
         "meta": {
             "created_at": now,
             "updated_at": now,
@@ -183,17 +182,7 @@ def _default_ledger() -> Dict[str, Any]:
     }
 
 
-
-
 def _ensure_positions_schema(state: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Ensure ledger positions use the bucketed schema.
-
-    Supported on disk:
-      - legacy flat dict: {"AAPL": {qty, avg_price}, ...}
-      - bucketed dict: {"ACTIVE": {...}, "CARRY": {...}}
-
-    Returns the bucket dict (ACTIVE/CARRY), mutating state in-place.
-    """
     raw = state.get("positions")
     if not isinstance(raw, dict):
         raw = {}
@@ -227,8 +216,9 @@ def _positions_view(state: Dict[str, Any], scope: str) -> Dict[str, Any]:
         return out
     if scope == "CARRY":
         return buckets.get("CARRY", {}) if isinstance(buckets.get("CARRY"), dict) else {}
-    # default ACTIVE
     return buckets.get("ACTIVE", {}) if isinstance(buckets.get("ACTIVE"), dict) else {}
+
+
 def _read_ledger() -> Dict[str, Any]:
     if not LEDGER_PATH.exists():
         return _default_ledger()
@@ -242,6 +232,7 @@ def _read_ledger() -> Dict[str, Any]:
         data.setdefault("cash", _starting_cash_cap())
         data.setdefault("positions", {})
         data.setdefault("fills", [])
+
         meta = data.get("meta")
         if not isinstance(meta, dict):
             meta = {}
@@ -281,19 +272,9 @@ def _save_ledger(state: Dict[str, Any]) -> None:
 # Alpaca PAPER client (stdlib only)
 # =========================
 
-def _alpaca_keys() -> tuple[str, str]:
-    key = (ALPACA_API_KEY_ID or ALPACA_KEY or "").strip()
-    secret = (ALPACA_API_SECRET_KEY or ALPACA_SECRET or "").strip()
-    return key, secret
-
-
-def _alpaca_enabled() -> bool:
-    k, s = _alpaca_keys()
-    return bool(k and s)
-
 
 def _alpaca_base_v2() -> str:
-    base = (ALPACA_PAPER_BASE_URL or "").strip() or "https://paper-api.alpaca.markets/v2"
+    base = (ALPACA_PAPER_BASE_URL or "").strip() or "https://paper-api.alpaca.markets"
     base = base.rstrip("/")
     if not base.endswith("/v2"):
         base = base + "/v2"
@@ -309,31 +290,80 @@ def _alpaca_headers() -> Dict[str, str]:
     }
 
 
+def _http_json(method: str, path: str, payload: Dict[str, Any] | None = None, timeout: float = 15.0) -> Any:
+    url = _alpaca_base_v2() + path
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method.upper())
+    for hk, hv in _alpaca_headers().items():
+        req.add_header(hk, hv)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            if not raw:
+                return None
+            try:
+                return json.loads(raw)
+            except Exception:
+                return raw
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+        raise RuntimeError(f"alpaca {method} {path} {e.code}: {body[:500]}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"alpaca {method} {path} urlerror: {e}")
+
+
+def _alpaca_post(path: str, payload: Dict[str, Any]) -> Any:
+    return _http_json("POST", path, payload=payload, timeout=20.0)
 
 
 def _alpaca_get(path: str) -> Any:
-    """GET helper for Alpaca v2 endpoints. Returns parsed JSON or raises."""
-    base = _alpaca_base_v2()
-    url = base + path
-    req = urllib.request.Request(url, headers=_alpaca_headers(), method="GET")
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        raw = resp.read().decode("utf-8", errors="ignore")
-    return json.loads(raw) if raw else None
+    return _http_json("GET", path, payload=None, timeout=15.0)
+
+
+def _alpaca_delete(path: str) -> Any:
+    return _http_json("DELETE", path, payload=None, timeout=15.0)
+
+
+def _alpaca_account() -> Dict[str, Any]:
+    """Fetch Alpaca /account (raw dict)."""
+    if not _alpaca_enabled():
+        return {}
+    try:
+        acct = _alpaca_get("/account")
+        return acct if isinstance(acct, dict) else {}
+    except Exception as e:
+        log(f"[alpaca] ⚠️ account fetch failed: {e}")
+        return {}
 
 
 def _alpaca_account_cash() -> float:
-    try:
-        acct = _alpaca_get("/account")
-        if isinstance(acct, dict):
-            return _safe_float(acct.get("cash"), 0.0)
-    except Exception:
-        pass
+    acct = _alpaca_account()
+    return _safe_float(acct.get("cash"), 0.0) if isinstance(acct, dict) else 0.0
+
+
+def _alpaca_account_equity() -> float:
+    """Return broker-reported equity/portfolio value."""
+    acct = _alpaca_account()
+    if not isinstance(acct, dict):
+        return 0.0
+    # Alpaca returns strings.
+    for k in ("equity", "portfolio_value", "last_equity"):
+        v = _safe_float(acct.get(k), 0.0)
+        if v > 0:
+            return v
     return 0.0
 
 
 def _alpaca_positions() -> Dict[str, Position]:
-    """Return account-level Alpaca positions as Position objects."""
     out: Dict[str, Position] = {}
+    if not _alpaca_enabled():
+        return out
     try:
         items = _alpaca_get("/positions")
         if not isinstance(items, list):
@@ -406,87 +436,98 @@ def reconcile_ledger_from_broker(
         "carry": len(_positions_view(state, "CARRY")),
         "synced_cash": bool(sync_cash),
     }
-def _http_json(method: str, path: str, payload: Dict[str, Any] | None = None, timeout: float = 15.0) -> Any:
-    url = _alpaca_base_v2() + path
-    data = None
-    if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, method=method.upper())
-    for hk, hv in _alpaca_headers().items():
-        req.add_header(hk, hv)
+
+
+# =========================
+# Broker snapshot cache (v2.3)
+# =========================
+
+
+_ACCOUNT_CACHE: Dict[str, Any] = {}
+_ACCOUNT_CACHE_TS: float = 0.0
+
+
+def get_account_cached(*, ttl_sec: int = 180, force: bool = False) -> Dict[str, Any]:
+    """Return Alpaca /account snapshot, cached for ttl_sec.
+
+    Returns {} if Alpaca disabled/unavailable.
+    """
+    global _ACCOUNT_CACHE, _ACCOUNT_CACHE_TS
+
+    if not _alpaca_enabled():
+        return {}
+
+    now = time.time()
+    ttl = max(1, int(ttl_sec))
+    if (not force) and _ACCOUNT_CACHE and (now - _ACCOUNT_CACHE_TS) < ttl:
+        return _ACCOUNT_CACHE
+
+    acct = _alpaca_account()
+    if isinstance(acct, dict) and acct:
+        _ACCOUNT_CACHE = acct
+        _ACCOUNT_CACHE_TS = now
+        return acct
+
+    # If fetch failed, don't nuke the last good cache instantly.
+    return _ACCOUNT_CACHE if isinstance(_ACCOUNT_CACHE, dict) else {}
+
+
+def get_equity_cached(*, ttl_sec: int = 180, force: bool = False) -> float:
+    acct = get_account_cached(ttl_sec=ttl_sec, force=force)
+    if not isinstance(acct, dict) or not acct:
+        return 0.0
+    for k in ("equity", "portfolio_value", "last_equity"):
+        v = _safe_float(acct.get(k), 0.0)
+        if v > 0:
+            return v
+    return 0.0
+
+
+
+
+# =========================
+# Strategy ownership registry reconcile (v2.4)
+# =========================
+
+_OWNERSHIP_RECONCILE_TS: float = 0.0
+_OWNERSHIP_RECONCILE_LAST: dict = {}
+
+
+def reconcile_ownership_cached(*, ttl_sec: int = 180, force: bool = False) -> dict:
+    """Refresh ownership registry against Alpaca positions (safety only).
+
+    We cannot reliably infer which strategy owns which Alpaca shares. So we
+    use this to detect mismatches like: reserved_total > alpaca_qty.
+
+    Returns a small summary dict and stores it in a cache.
+    """
+    global _OWNERSHIP_RECONCILE_TS, _OWNERSHIP_RECONCILE_LAST
+
+    if not _alpaca_enabled():
+        return {}
+
+    now = time.time()
+    ttl = max(1, int(ttl_sec))
+    if (not force) and _OWNERSHIP_RECONCILE_LAST and (now - _OWNERSHIP_RECONCILE_TS) < ttl:
+        return _OWNERSHIP_RECONCILE_LAST
+
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-            if not raw:
-                return None
-            try:
-                return json.loads(raw)
-            except Exception:
-                return raw
-    except urllib.error.HTTPError as e:
-        body = ""
-        try:
-            body = e.read().decode("utf-8", errors="replace")
-        except Exception:
-            body = ""
-        raise RuntimeError(f"alpaca {method} {path} {e.code}: {body[:500]}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"alpaca {method} {path} urlerror: {e}")
-
-
-def _alpaca_post(path: str, payload: Dict[str, Any]) -> Any:
-    return _http_json("POST", path, payload=payload, timeout=20.0)
-
-
-def _alpaca_get(path: str) -> Any:
-    return _http_json("GET", path, payload=None, timeout=15.0)
-
-
-def _alpaca_delete(path: str) -> Any:
-    return _http_json("DELETE", path, payload=None, timeout=15.0)
-
-
-def _fmt_qty(q: float) -> str:
-    if q <= 0:
-        return "0"
-    s = f"{q:.8f}".rstrip("0").rstrip(".")
-    return s if s else "0"
-
-
-def _client_order_id() -> str:
-    # Alpaca client_order_id max length is 48 chars; keep it tight.
-    bid = _bot_id()[:14]
-    suffix = uuid.uuid4().hex[:16]
-    return f"DT{bid}-{suffix}"[:48]
-
-
-def _poll_order(order_id: str, max_wait_s: float = 4.0) -> Dict[str, Any]:
-    deadline = time.time() + max_wait_s
-    last: Dict[str, Any] = {}
-    while time.time() < deadline:
-        o = _alpaca_get(f"/orders/{order_id}")
-        if isinstance(o, dict):
-            last = o
-            status = str(o.get("status", "")).lower()
-            filled_qty = _safe_float(o.get("filled_qty") or 0.0, 0.0)
-            if status in {"filled", "canceled", "rejected"}:
-                return o
-            if filled_qty > 0 and status in {"partially_filled", "accepted", "new"}:
-                return o
-        time.sleep(0.35)
-    return last or {"status": "unknown"}
-
-
-def _cancel_order(order_id: str) -> None:
-    try:
-        _alpaca_delete(f"/orders/{order_id}")
+        broker_pos = _alpaca_positions()
+        reg = load_registry()
+        summary = reconcile_with_alpaca_positions(reg, broker_pos)
+        save_registry(reg)
+        _OWNERSHIP_RECONCILE_LAST = summary
+        _OWNERSHIP_RECONCILE_TS = now
+        if isinstance(summary, dict) and summary.get('mismatch_symbols'):
+            log(f"[broker_ownership] 🧯 mismatch detected: {summary.get('mismatch_symbols')}")
+        return summary
     except Exception as e:
-        log(f"[broker_alpaca] ⚠️ cancel failed for {order_id}: {e}")
-
-
+        log(f"[broker_ownership] ⚠️ reconcile failed: {e}")
+        return _OWNERSHIP_RECONCILE_LAST if isinstance(_OWNERSHIP_RECONCILE_LAST, dict) else {}
 # =========================
 # Local allowance ledger API (public read)
 # =========================
+
 
 def get_positions() -> Dict[str, Position]:
     state = _read_ledger()
@@ -523,24 +564,56 @@ def get_positions_scoped(scope: str) -> Dict[str, Position]:
     return out
 
 
-
 def get_cash() -> float:
     state = _read_ledger()
     return _safe_float(state.get("cash", 0.0), 0.0)
 
 
 def get_ledger_state() -> Dict[str, Any]:
-    """Return the full per-bot local ledger (cash/positions/fills/meta).
-
-    This is intentionally read-only; mutations happen through submit_order().
-    """
     return _read_ledger()
 
 
+# =========================
+# Execution helpers
+# =========================
 
-# =========================
-# Execution: Alpaca if enabled, else pure local simulation
-# =========================
+
+def _fmt_qty(q: float) -> str:
+    if q <= 0:
+        return "0"
+    s = f"{q:.8f}".rstrip("0").rstrip(".")
+    return s if s else "0"
+
+
+def _client_order_id() -> str:
+    bid = _bot_id()[:14]
+    suffix = uuid.uuid4().hex[:16]
+    return f"DT{bid}-{suffix}"[:48]
+
+
+def _poll_order(order_id: str, max_wait_s: float = 4.0) -> Dict[str, Any]:
+    deadline = time.time() + max_wait_s
+    last: Dict[str, Any] = {}
+    while time.time() < deadline:
+        o = _alpaca_get(f"/orders/{order_id}")
+        if isinstance(o, dict):
+            last = o
+            status = str(o.get("status", "")).lower()
+            filled_qty = _safe_float(o.get("filled_qty") or 0.0, 0.0)
+            if status in {"filled", "canceled", "rejected"}:
+                return o
+            if filled_qty > 0 and status in {"partially_filled", "accepted", "new"}:
+                return o
+        time.sleep(0.35)
+    return last or {"status": "unknown"}
+
+
+def _cancel_order(order_id: str) -> None:
+    try:
+        _alpaca_delete(f"/orders/{order_id}")
+    except Exception as e:
+        log(f"[broker_alpaca] ⚠️ cancel failed for {order_id}: {e}")
+
 
 def _ledger_apply_fill(state: Dict[str, Any], sym: str, side: str, filled_qty: float, fill_price: float) -> Dict[str, Any]:
     buckets = _ensure_positions_schema(state)
@@ -548,6 +621,7 @@ def _ledger_apply_fill(state: Dict[str, Any], sym: str, side: str, filled_qty: f
     if not isinstance(positions, dict):
         positions = {}
         buckets["ACTIVE"] = positions
+
     fills = state.get("fills") or []
     if not isinstance(fills, list):
         fills = []
@@ -557,6 +631,17 @@ def _ledger_apply_fill(state: Dict[str, Any], sym: str, side: str, filled_qty: f
     pos = positions.get(sym) or {"qty": 0.0, "avg_price": 0.0}
     pos_qty = _safe_float(pos.get("qty", 0.0), 0.0)
     pos_avg = _safe_float(pos.get("avg_price", 0.0), 0.0)
+
+    # Strategy-level ownership guard (prevents DT selling Swing, etc.)
+    owner = _strategy_owner()
+    reg = load_registry()
+    if side == "SELL":
+        allowed = can_sell_qty(reg, sym, owner)
+        if allowed <= 0.0:
+            return {"status": "rejected", "reason": "not_owned_by_strategy", "symbol": sym, "strategy": owner}
+        if qty_req > allowed:
+            qty_req = allowed
+
 
     realized_pnl = 0.0
 
@@ -593,25 +678,12 @@ def _ledger_apply_fill(state: Dict[str, Any], sym: str, side: str, filled_qty: f
     fills.append(fill)
 
     state["cash"] = float(cash)
-    state["positions"] = positions
+    state["positions"] = buckets
     state["fills"] = fills
     return state
 
 
 def submit_order(order: Order, last_price: float | None = None) -> Dict[str, Any]:
-    """
-    Submit an order with a per-bot local allowance ledger.
-
-    Steps:
-      1) Validate side/qty
-      2) Validate against local ledger cash/positions
-      3) If Alpaca enabled -> send order to Alpaca paper, poll for fill, cancel remainder
-         Else -> local simulation fill (requires last_price for price)
-      4) Apply fill to local ledger and return normalized fill dict
-
-    Note:
-      - For LIMIT orders, if last_price is missing we reject (keeps old behavior).
-    """
     sym = str(order.symbol).upper().strip()
     side = str(order.side).upper().strip()
     qty_req = _safe_float(order.qty, 0.0)
@@ -625,38 +697,48 @@ def submit_order(order: Order, last_price: float | None = None) -> Dict[str, Any
 
     state = _read_ledger()
     cash = _safe_float(state.get("cash", 0.0), 0.0)
-    positions = state.get("positions") or {}
+    buckets = _ensure_positions_schema(state)
+    positions = buckets.get("ACTIVE", {})
     if not isinstance(positions, dict):
         positions = {}
+        buckets["ACTIVE"] = positions
 
     pos = positions.get(sym) or {"qty": 0.0, "avg_price": 0.0}
     pos_qty = _safe_float(pos.get("qty", 0.0), 0.0)
     pos_avg = _safe_float(pos.get("avg_price", 0.0), 0.0)
 
+    # Strategy-level ownership guard (prevents DT selling Swing, etc.)
+    owner = _strategy_owner()
+    reg = load_registry()
+    if side == "SELL":
+        allowed = can_sell_qty(reg, sym, owner)
+        if allowed <= 0.0:
+            return {"status": "rejected", "reason": "not_owned_by_strategy", "symbol": sym, "strategy": owner}
+        if qty_req > allowed:
+            qty_req = allowed
+
+
     # For local validation, we need a reference price to check affordability on BUY.
-    # Use last_price when present; else for limit order use limit_price.
     ref_price = None
     if order.limit_price is not None:
         ref_price = _safe_float(order.limit_price, None)  # type: ignore[arg-type]
     elif last_price is not None:
         ref_price = _safe_float(last_price, None)  # type: ignore[arg-type]
 
-    # Allowance checks (local)
     if side == "BUY":
         if ref_price is None:
             return {"status": "rejected", "reason": "no_price_for_buy_check"}
         est_cost = ref_price * qty_req
         if est_cost > cash:
             return {"status": "rejected", "reason": "insufficient_cash_allowance"}
-    else:  # SELL
+    else:
         if pos_qty <= 0:
             return {"status": "rejected", "reason": "no_position_allowance"}
         if qty_req > pos_qty:
-            qty_req = pos_qty  # clamp to local position
+            qty_req = pos_qty
 
     # ===== Execute on Alpaca if enabled =====
     if _alpaca_enabled():
-        # Keep behavior consistent: require last_price for limit guardrails (optional)
         if order.limit_price is not None and last_price is None:
             return {"status": "rejected", "reason": "no_price_for_limit"}
 
@@ -686,23 +768,25 @@ def submit_order(order: Order, last_price: float | None = None) -> Dict[str, Any
 
             status = str(final.get("status", "")).lower()
             filled_qty = _safe_float(final.get("filled_qty") or 0.0, 0.0)
-            filled_avg = final.get("filled_avg_price")
-            fill_price = _safe_float(filled_avg, 0.0)
+            fill_price = _safe_float(final.get("filled_avg_price"), 0.0)
 
-            # If Alpaca didn't fill quickly, cancel and reject (keeps "instant fill" semantics)
             if filled_qty <= 0:
                 _cancel_order(oid)
-                return {"status": "rejected", "reason": f"alpaca_not_filled_fast", "id": oid, "alpaca_status": status}
+                return {"status": "rejected", "reason": "alpaca_not_filled_fast", "id": oid, "alpaca_status": status}
 
-            # If partial fill, cancel remainder so local ledger matches the executed qty
             if status != "filled":
                 _cancel_order(oid)
 
-            # Apply fill to local ledger
             state2 = _ledger_apply_fill(state, sym, side, filled_qty, fill_price)
             _save_ledger(state2)
 
-            # Compute realized pnl from local basis (pos_avg before fill for SELL)
+            # Shared strategy ownership registry update (prevents cross-strategy sells)
+            try:
+                reg = reserve_on_fill(reg, sym, side, float(filled_qty), owner)
+                save_registry(reg)
+            except Exception:
+                pass
+
             realized_pnl = 0.0
             if side == "SELL":
                 realized_pnl = (fill_price - pos_avg) * filled_qty
@@ -732,7 +816,6 @@ def submit_order(order: Order, last_price: float | None = None) -> Dict[str, Any
         return {"status": "rejected", "reason": "no_price_local"}
 
     fill_price = _safe_float(last_price, 0.0)
-    # Limit behavior: only fill if favorable vs last_price (old logic)
     if order.limit_price is not None:
         lp = _safe_float(order.limit_price, 0.0)
         if side == "BUY" and fill_price > lp:
@@ -745,6 +828,14 @@ def submit_order(order: Order, last_price: float | None = None) -> Dict[str, Any
 
     state2 = _ledger_apply_fill(state, sym, side, filled_qty, fill_price)
     _save_ledger(state2)
+
+    # Update shared strategy ownership registry (filled qty only).
+    try:
+        reg = load_registry()
+        reserve_on_fill(reg, sym, side, float(filled_qty), _strategy_owner())
+        save_registry(reg)
+    except Exception:
+        pass
 
     realized_pnl = 0.0
     if side == "SELL":
@@ -764,9 +855,19 @@ def submit_order(order: Order, last_price: float | None = None) -> Dict[str, Any
     }
 
 
+# =========================
+# Wrapper class (compat)
+# =========================
 
 
 _RECONCILE_DONE: bool = False
+_REGISTRY_LAST_RECONCILE_TS: float = 0.0
+_REGISTRY_LAST_RECONCILE: float = 0.0
+_REG_LAST_RECONCILE_TS: float = 0.0
+_REGISTRY_LAST_SYNC: float = 0.0
+
+
+
 class BrokerAPI:
     """Thin wrapper around the module-level broker functions + optional reconciliation."""
 
@@ -775,14 +876,15 @@ class BrokerAPI:
         if _RECONCILE_DONE:
             return
 
-        if _env("DT_LEDGER_RECONCILE_ON_STARTUP", "0") in {"1", "true", "TRUE", "yes", "YES"}:
+        if _env("DT_LEDGER_RECONCILE_ON_STARTUP", "0").lower() in {"1", "true", "yes", "y", "on"}:
             mode = _env("DT_LEDGER_RECONCILE_MODE", "IMPORT")
-            sync_cash = _env("DT_LEDGER_RECONCILE_SYNC_CASH", "0") in {"1", "true", "TRUE", "yes", "YES"}
+            sync_cash = _env("DT_LEDGER_RECONCILE_SYNC_CASH", "0").lower() in {"1", "true", "yes", "y", "on"}
             try:
                 res = reconcile_ledger_from_broker(mode=mode, sync_cash=sync_cash)
                 log(f"[broker_ledger] 🔄 reconcile_on_startup: {res}")
             except Exception as e:
                 log(f"[broker_ledger] ⚠️ reconcile_on_startup failed: {e}")
+
         _RECONCILE_DONE = True
 
     def get_cash(self) -> float:
@@ -793,3 +895,11 @@ class BrokerAPI:
 
     def submit_order(self, order: Order, last_price: float | None = None) -> Dict[str, Any]:
         return submit_order(order, last_price=last_price)
+
+    # v2.3: broker snapshot cache
+    def get_account_cached(self, *, ttl_sec: int = 180, force: bool = False) -> Dict[str, Any]:
+        return get_account_cached(ttl_sec=ttl_sec, force=force)
+
+    def get_equity_cached(self, *, ttl_sec: int = 180, force: bool = False) -> float:
+        return get_equity_cached(ttl_sec=ttl_sec, force=force)
+

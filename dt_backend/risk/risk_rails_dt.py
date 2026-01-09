@@ -1,11 +1,11 @@
-# dt_backend/risk/risk_rails_dt.py — v1.0 (Phase 0)
+# dt_backend/risk/risk_rails_dt.py — v1.1 (Phase 0)
 """Hard risk rails for dt_backend (Phase 0).
 
 This is the "adult supervision" layer. It prevents the daytrading loop from
 continuing to trade once predefined limits are violated.
 
 Enforced constraints (env overrides)
-----------------------------------
+-----------------------------------
 - DT_DAILY_LOSS_LIMIT_USD (default 300.0)
 - DT_DAILY_DRAWDOWN_PCT (default 0.02 => 2%)
 - DT_MAX_OPEN_POSITIONS (default 3)
@@ -13,20 +13,31 @@ Enforced constraints (env overrides)
 - DT_COOLDOWN_AFTER_LOSS_DELTAS (default 3)
 - DT_COOLDOWN_MINUTES (default 20)
 
-Notes
------
-We don't assume a broker feed for exact equity. We use dt_metrics.json
-(estimates based on local ledgers + last prices in rolling). This is meant
-to be conservative and *trip early* rather than late.
+v1.1 additions
+--------------
+- Optional broker equity/PnL source:
+    DT_RISK_EQUITY_SOURCE = auto|broker|ledger  (default: auto)
+    DT_RISK_BROKER_TTL_SEC = 180 (default)
+
+  In auto mode we prefer broker equity when available, falling back to the
+  local dt_metrics.json estimates.
+
+Why this exists
+---------------
+Local ledgers are great for strategy-level accounting, but they can drift or be
+out-of-sync during manual intervention or after crashes. Using broker-reported
+account equity for *daily kill-switches* avoids false "daily_loss_limit_hit".
+
+We still keep the local estimate around for exposure/position heuristics.
 """
 
 from __future__ import annotations
 
-import os
 import math
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 try:
     from zoneinfo import ZoneInfo  # py3.9+
@@ -35,7 +46,14 @@ except Exception:  # pragma: no cover
 
 from dt_backend.core import DT_PATHS
 from dt_backend.core.logger_dt import log
+from dt_backend.core.position_registry import load_registry
 from dt_backend.services.dt_truth_store import metrics_path, read_json, atomic_write_json
+
+# Optional broker hooks (safe if unavailable)
+try:
+    from dt_backend.engines.broker_api import BrokerAPI  # type: ignore
+except Exception:  # pragma: no cover
+    BrokerAPI = None  # type: ignore
 
 
 def _env_float(name: str, default: float) -> float:
@@ -52,6 +70,10 @@ def _env_int(name: str, default: int) -> int:
         return int(float(raw)) if raw != "" else int(default)
     except Exception:
         return int(default)
+
+
+def _env_str(name: str, default: str) -> str:
+    return (os.getenv(name, default) or default).strip()
 
 
 def _utc_now() -> datetime:
@@ -145,6 +167,32 @@ def _write_state(st: Dict[str, Any]) -> None:
         pass
 
 
+def _broker_equity_snapshot(ttl_sec: int = 180) -> Tuple[Optional[float], Dict[str, Any]]:
+    """Return (equity, raw_snapshot). equity=None if unavailable."""
+    if BrokerAPI is None:
+        return None, {"status": "unavailable"}
+    try:
+        b = BrokerAPI()
+        # New in broker_api v2.3
+        if hasattr(b, "get_account_cached"):
+            snap = b.get_account_cached(ttl_sec=ttl_sec)  # type: ignore[attr-defined]
+        else:
+            snap = None
+        if not isinstance(snap, dict) or not snap:
+            return None, {"status": "empty"}
+        eq = snap.get("equity")
+        eq_f = _safe_float(eq, 0.0)
+        if eq_f > 0:
+            return float(eq_f), snap
+        # Some accounts only expose portfolio_value
+        pv_f = _safe_float(snap.get("portfolio_value"), 0.0)
+        if pv_f > 0:
+            return float(pv_f), snap
+        return None, snap
+    except Exception as e:
+        return None, {"status": "error", "error": str(e)[:200]}
+
+
 def assess_and_update_risk_rails(*, now_utc: Optional[datetime] = None) -> Dict[str, Any]:
     """Evaluate rails and return summary.
 
@@ -160,20 +208,41 @@ def assess_and_update_risk_rails(*, now_utc: Optional[datetime] = None) -> Dict[
     cooldown_after_losses = _env_int("DT_COOLDOWN_AFTER_LOSS_DELTAS", 3)
     cooldown_minutes = _env_int("DT_COOLDOWN_MINUTES", 20)
 
+    equity_source_pref = _env_str("DT_RISK_EQUITY_SOURCE", "auto").lower()  # auto|broker|ledger
+    broker_ttl = _env_int("DT_RISK_BROKER_TTL_SEC", 180)
+
+    # Local metrics (still useful for exposure / position heuristics)
     metrics = read_json(metrics_path(), {})
     msum = _sum_equity_and_exposure(metrics if isinstance(metrics, dict) else {})
-    equity = float(msum["equity"])
+    equity_ledger = float(msum["equity"])
     pos_val = float(msum["pos_val"])
     realized_total = float(msum["realized"])
     open_positions = int(msum["positions"])
 
+    # Broker equity (preferred for daily kill-switches when available)
+    broker_equity, broker_snap = _broker_equity_snapshot(ttl_sec=broker_ttl)
+
+    use_broker = False
+    if equity_source_pref == "broker":
+        use_broker = broker_equity is not None
+    elif equity_source_pref == "ledger":
+        use_broker = False
+    else:  # auto
+        use_broker = broker_equity is not None
+
+    equity = float(broker_equity) if use_broker and broker_equity is not None else float(equity_ledger)
+    equity_source = "broker" if use_broker and broker_equity is not None else "ledger"
+
     exposure_frac = (pos_val / equity) if equity > 1e-9 else 0.0
 
     st = _read_state()
+    reset_on_source_change = _env_int("DT_RISK_RESET_ON_SOURCE_CHANGE", 1) != 0
+
     if st.get("date") != session_date:
         # new day: reset
         st = {
             "date": session_date,
+            "equity_source": equity_source,
             "start_equity": equity,
             "peak_equity": equity,
             "last_realized": realized_total,
@@ -181,6 +250,13 @@ def assess_and_update_risk_rails(*, now_utc: Optional[datetime] = None) -> Dict[
             "cooldown_until": "",
             "ts": now.isoformat().replace("+00:00", "Z"),
         }
+    else:
+        # Same day, but if the equity source changed (e.g., broker becomes available),
+        # avoid mixing baselines which can generate massive false PnL.
+        if reset_on_source_change and st.get("equity_source") and st.get("equity_source") != equity_source:
+            st["equity_source"] = equity_source
+            st["start_equity"] = equity
+            st["peak_equity"] = equity
 
     start_equity = _safe_float(st.get("start_equity"), equity)
     peak_equity = max(_safe_float(st.get("peak_equity"), equity), equity)
@@ -189,7 +265,7 @@ def assess_and_update_risk_rails(*, now_utc: Optional[datetime] = None) -> Dict[
     drawdown_from_peak = equity - peak_equity
     dd_pct = (-drawdown_from_peak / peak_equity) if peak_equity > 1e-9 and drawdown_from_peak < 0 else 0.0
 
-    # consecutive loss deltas: based on realized_pnl_est changes
+    # consecutive loss deltas: based on realized_pnl_est changes (ledger-only, by design)
     last_realized = _safe_float(st.get("last_realized"), realized_total)
     delta_realized = realized_total - last_realized
     consec = int(_safe_float(st.get("consec_loss_deltas"), 0))
@@ -218,6 +294,18 @@ def assess_and_update_risk_rails(*, now_utc: Optional[datetime] = None) -> Dict[
         cooldown_until = dt.isoformat().replace("+00:00", "Z")
         consec = 0  # reset after triggering
 
+    # Position ownership safety: if our local strategy registry disagrees with broker reality,
+    # stand down and force a reconcile. This prevents DT from accidentally selling Swing holdings.
+    try:
+        reg = load_registry()
+        mismatch = reg.get("mismatch") if isinstance(reg, dict) else {}
+        if isinstance(mismatch, dict) and mismatch.get("has_mismatch") is True:
+            st_m = mismatch.get("symbols")
+            stand_down = True
+            reason = f"position_registry_mismatch symbols={len(st_m) if isinstance(st_m, dict) else 0}"
+    except Exception:
+        pass
+
     # Determine stand_down
     stand_down = False
     reason = ""
@@ -229,14 +317,14 @@ def assess_and_update_risk_rails(*, now_utc: Optional[datetime] = None) -> Dict[
     # daily loss kill switch (absolute)
     if not stand_down and daily_loss_limit > 0 and pnl_today <= -abs(daily_loss_limit):
         stand_down = True
-        reason = f"daily_loss_limit_hit pnl_today={pnl_today:.2f}"
+        reason = f"daily_loss_limit_hit pnl_today={pnl_today:.2f} source={equity_source}"
 
     # drawdown percent kill switch
     if not stand_down and daily_dd_pct > 0 and dd_pct >= abs(daily_dd_pct):
         stand_down = True
-        reason = f"daily_drawdown_pct_hit dd={dd_pct:.4f}"
+        reason = f"daily_drawdown_pct_hit dd={dd_pct:.4f} source={equity_source}"
 
-    # max exposure
+    # max exposure (still ledger-estimated; conservative)
     if not stand_down and max_exposure_frac > 0 and exposure_frac >= max_exposure_frac:
         stand_down = True
         reason = f"max_exposure_hit exposure={exposure_frac:.3f}"
@@ -247,6 +335,7 @@ def assess_and_update_risk_rails(*, now_utc: Optional[datetime] = None) -> Dict[
         reason = f"max_open_positions_hit open={open_positions}"
 
     st["date"] = session_date
+    st["equity_source"] = equity_source
     st["start_equity"] = float(start_equity)
     st["peak_equity"] = float(max(peak_equity, equity))
     st["last_realized"] = float(realized_total)
@@ -260,16 +349,38 @@ def assess_and_update_risk_rails(*, now_utc: Optional[datetime] = None) -> Dict[
         "date": session_date,
         "stand_down": bool(stand_down),
         "reason": reason,
-        "equity_est": float(equity),
-        "start_equity_est": float(start_equity),
-        "pnl_today_est": float(pnl_today),
-        "peak_equity_est": float(st["peak_equity"]),
-        "drawdown_from_peak_est": float(equity - float(st["peak_equity"])),
+
+        # Equity/PnL (now *source-aware*)
+        "equity_source": equity_source,
+        "equity": float(equity),
+        "start_equity": float(start_equity),
+        "pnl_today": float(pnl_today),
+        "peak_equity": float(st["peak_equity"]),
+        "drawdown_from_peak": float(equity - float(st["peak_equity"])),
         "drawdown_pct_from_peak": float(dd_pct),
+
+        # Exposure/position heuristics (ledger-estimated)
         "open_positions_est": int(open_positions),
+        "positions_value_est": float(pos_val),
         "exposure_frac_est": float(exposure_frac),
+
+        # Realized delta (ledger-estimated)
+        "realized_pnl_est": float(realized_total),
         "delta_realized_est": float(delta_realized),
+
+        # Cooldown
         "cooldown_until": cooldown_until,
+
+        # Debug broker snapshot (small)
+        "broker": {
+            "available": bool(broker_equity is not None),
+            "ttl_sec": int(broker_ttl),
+            "status": broker_snap.get("status"),
+            "equity": broker_snap.get("equity"),
+            "portfolio_value": broker_snap.get("portfolio_value"),
+            "last_equity": broker_snap.get("last_equity"),
+            "timestamp": broker_snap.get("ts"),
+        },
     }
 
     try:
