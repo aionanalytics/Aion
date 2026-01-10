@@ -1,4 +1,4 @@
-# dt_backend/core/policy_engine_dt.py — v2.1 (LANE-AWARE + BUGFIXES)
+# v2.1.2 (LANE-AWARE, POSITION-AWARE, PROFILE-AWARE)
 """
 Intraday policy engine for dt_backend.
 
@@ -37,48 +37,61 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple, Optional
 
 from dt_backend.tuning.dt_profile_loader import load_dt_profile, strategy_weight
-
 from .data_pipeline_dt import _read_rolling, save_rolling, ensure_symbol_node, log
 
-# Phase 7: calibrated P(hit) (optional)
+# --- OPTIONAL IMPORTS (UNCHANGED) ---
 try:
     from dt_backend.calibration.phit_calibrator_dt import get_phit
-except Exception:  # pragma: no cover
+except Exception:
     get_phit = None  # type: ignore
 
-# Phase 8/9: risk + researcher rules (optional)
 try:
     from dt_backend.risk.news_event_risk_dt import assess_symbol_risk
-except Exception:  # pragma: no cover
+except Exception:
     assess_symbol_risk = None  # type: ignore
 
 try:
     from dt_backend.researcher.rules_runtime_dt import bot_allowed
-except Exception:  # pragma: no cover
+except Exception:
     bot_allowed = None  # type: ignore
 
 try:
     from dt_backend.risk.news_event_risk_dt import risk_adjust_policy
-except Exception:  # pragma: no cover
+except Exception:
     risk_adjust_policy = None  # type: ignore
 
-# Phase 5.5: portfolio heat manager (optional)
 try:
     from dt_backend.risk.portfolio_heat_dt import apply_portfolio_heat_gates
-except Exception:  # pragma: no cover
+except Exception:
     apply_portfolio_heat_gates = None  # type: ignore
 
 try:
     from dt_backend.researcher.rules_dt import rules_adjust_setup
-except Exception:  # pragma: no cover
+except Exception:
     rules_adjust_setup = None  # type: ignore
 
-# Phase 3: strategy bots (ORB / VWAP MR / trend pullback / squeeze)
 try:
     from dt_backend.strategies import select_best_setup
-except Exception:  # pragma: no cover
+except Exception:
     select_best_setup = None  # type: ignore
 
+
+# ============================================================
+# 🔐 POSITION DETECTION (NEW, SAFE, BACKWARD-COMPATIBLE)
+# ============================================================
+
+def _has_position(node: Dict[str, Any]) -> bool:
+    """
+    Best-effort detection of an open long position.
+    Compatible with multiple execution backends.
+    """
+    try:
+        pos = node.get("position_dt") or node.get("position") or {}
+        if isinstance(pos, dict):
+            return float(pos.get("qty") or 0.0) > 0.0
+        return bool(node.get("holding") is True)
+    except Exception:
+        return False
 
 @dataclass
 class PolicyConfig:
@@ -240,30 +253,6 @@ def _apply_profile_overrides(cfg: PolicyConfig, profile: Dict[str, Any]) -> Poli
     cfg.press_min_expected_r = max(0.5, min(5.0, float(cfg.press_min_expected_r)))
     cfg.press_conf_extra = max(0.0, min(0.25, float(cfg.press_conf_extra)))
     return cfg
-
-    try:
-        p = profile.get("probe") or {}
-        if "enabled" in p:
-            cfg.probe_enabled = bool(p.get("enabled"))
-        if "min_conf" in p:
-            cfg.probe_min_signal_conf = float(p.get("min_conf"))
-        if "min_score" in p:
-            cfg.probe_min_abs_score = float(p.get("min_score"))
-    except Exception:
-        pass
-
-    try:
-        pr = profile.get("press") or {}
-        if "min_phit" in pr:
-            cfg.press_min_phit = float(pr.get("min_phit"))
-        if "min_r" in pr:
-            cfg.press_min_expected_r = float(pr.get("min_r"))
-        # size_mult is applied in execution_dt
-    except Exception:
-        pass
-
-    # Re-clamp with existing clamps via env function (cheap reuse)
-    return _apply_env_overrides(cfg)
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -738,6 +727,11 @@ def apply_intraday_policy(
             except Exception:
                 pass
             proposed_intent = str(setup.get("side") or "HOLD").upper()
+            has_position = _has_position(node)
+            if proposed_intent == "BUY" and has_position:
+                proposed_intent = "HOLD"
+            elif proposed_intent == "SELL" and not has_position:
+                proposed_intent = "HOLD"
             base_conf = float(setup.get("confidence") or 0.0)
             edge = float(setup.get("score") or 0.0) / 100.0  # score -> pseudo-edge scale
 
@@ -968,6 +962,11 @@ def apply_intraday_policy(
         p_sell = float(proba.get("SELL", 0.0))
 
         proposed_intent, base_conf, edge = _raw_intent_from_edge(p_buy, p_hold, p_sell, cfg)
+        has_position = _has_position(node)
+        if proposed_intent == "BUY" and has_position:
+            proposed_intent = "HOLD"
+        elif proposed_intent == "SELL" and not has_position:
+            proposed_intent = "HOLD"
         trend, vol_bkt = _trend_and_vol(ctx)
 
         conf_adj, adj_detail = _adjust_conf(base_conf, proposed_intent, trend, vol_bkt, regime_label, cfg)
