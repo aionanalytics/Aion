@@ -2,8 +2,9 @@
 
 import * as React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 
-import { Activity, Clock, DollarSign, Shield, SlidersHorizontal, RefreshCw } from "lucide-react";
+import { Activity, Clock, DollarSign, Shield, SlidersHorizontal, RefreshCw, Settings } from "lucide-react";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -931,6 +932,14 @@ export default function BotsPage() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            <Link
+              href="/bots/config"
+              className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm hover:bg-white/10 transition-colors"
+            >
+              <Settings className="h-4 w-4" />
+              <span>Configure Knobs</span>
+            </Link>
+            
             <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
               <Switch checked={live} onCheckedChange={setLive} />
               <div className="text-xs text-white/70">Live</div>
