@@ -104,11 +104,10 @@ async function handleRequest(
     });
 
     // Prepare fetch options
-    const fetchOptions: RequestInit = {
+    const fetchOptions: RequestInit & { duplex?: string } = {
       method,
       headers,
       // Handle Node 18+ duplex streaming for request bodies
-      // @ts-ignore - duplex is not in TypeScript types yet but required for streaming
       duplex: "half",
     };
 
@@ -142,12 +141,13 @@ async function handleRequest(
     });
 
     return proxyResponse;
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
     console.error("[DT Proxy] Request failed:", error);
     return NextResponse.json(
       {
         error: "DT backend request failed",
-        message: error?.message || "Unknown error",
+        message: errorMessage,
       },
       { status: 502 }
     );

@@ -63,9 +63,10 @@ export default function ConfigEditorPage() {
           loaded: true,
         },
       }));
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : "Unknown error";
       console.error(`Failed to load ${file.name}:`, error);
-      showStatus(`Failed to load ${file.name}: ${error.message}`, "error");
+      showStatus(`Failed to load ${file.name}: ${errorMessage}`, "error");
     }
   }
 
@@ -101,9 +102,10 @@ export default function ConfigEditorPage() {
 
       const data = await response.json();
       showStatus(data.message || `${file.name} saved successfully`, "success");
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : "Unknown error";
       console.error(`Failed to save ${file.name}:`, error);
-      showStatus(`Failed to save ${file.name}: ${error.message}`, "error");
+      showStatus(`Failed to save ${file.name}: ${errorMessage}`, "error");
     } finally {
       setSaving(false);
     }
