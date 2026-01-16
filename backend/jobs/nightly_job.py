@@ -525,6 +525,7 @@ def run_nightly_job(
                 dataset_name="training_data_daily.parquet",
                 use_optuna=use_optuna,
                 n_trials=n_trials,
+                as_of_date=as_of_date,  # Pass through for point-in-time filtering
             )
             _fail_loud_training_check(res)
             summary["sector_training"] = sector_res
@@ -792,6 +793,39 @@ def run_nightly_job(
                 "secs": round(time.time() - t0, 3),
                 "error": str(e_tune),
             }
+            _write_summary(summary)
+
+        # 22) EOD Snapshot capture (only in live mode, not replay)
+        if mode != "replay":
+            t0 = time.time()
+            try:
+                from backend.historical_replay_swing.snapshot_manager import (
+                    capture_eod_snapshot,
+                    SnapshotManager,
+                )
+                from backend.core.config import PATHS
+                from pathlib import Path
+                
+                snapshot = capture_eod_snapshot()
+                manager = SnapshotManager(Path(PATHS["swing_replay_snapshots"]))
+                manager.save_snapshot(snapshot)
+                
+                summary.setdefault("phases", {}).setdefault("eod_snapshot", {})
+                summary["phases"]["eod_snapshot"] = {
+                    "status": "ok",
+                    "secs": round(time.time() - t0, 3),
+                    "snapshot_date": snapshot.date,
+                    "bars_count": len(snapshot.bars) if not snapshot.bars.empty else 0,
+                }
+                log(f"[nightly] ✅ EOD snapshot saved: {snapshot.date}")
+            except Exception as e:
+                summary.setdefault("phases", {}).setdefault("eod_snapshot", {})
+                summary["phases"]["eod_snapshot"] = {
+                    "status": "error",
+                    "secs": round(time.time() - t0, 3),
+                    "error": str(e),
+                }
+                log(f"[nightly] ⚠️ Snapshot capture failed (non-fatal): {e}")
             _write_summary(summary)
 
         # Determine final status

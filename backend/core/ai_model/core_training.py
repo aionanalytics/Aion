@@ -499,11 +499,21 @@ def train_all_models(
     batch_size: int = 150_000,
     symbol_whitelist: Optional[set[str]] = None,
     model_root: Path | None = None,
+    as_of_date: Optional[str] = None,  # NEW: for replay mode point-in-time filtering
     **_: Any,
 ) -> Dict[str, Any]:
     # NOTE: Orchestration layers (nightly/replay) may pass extra keywords like
     # mode/as_of_date/force. We intentionally ignore them here so imports don't
     # break during refactors.
+    # 
+    # IMPORTANT: as_of_date filtering should happen at dataset build time
+    # (build_daily_dataset already supports as_of_date parameter).
+    # This parameter is kept here for API compatibility and documentation.
+    
+    if as_of_date:
+        log(f"[ai_model] 📌 Training with as_of_date={as_of_date} (point-in-time mode)")
+        log(f"[ai_model] ⚠️ Ensure dataset was built with same as_of_date to avoid look-ahead bias")
+    
     return train_model(
         dataset_name=dataset_name,
         use_optuna=use_optuna,
