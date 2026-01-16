@@ -116,7 +116,7 @@ def main():
         start_date = start.isoformat()
         end_date = end.isoformat()
     
-    log(f"[populate_regime_cache] �� Populating cache from {start_date} to {end_date}")
+    log(f"[populate_regime_cache] 🚀 Populating cache from {start_date} to {end_date}")
     log(f"[populate_regime_cache] Force recompute: {args.force}")
     
     stats = populate_regime_cache(

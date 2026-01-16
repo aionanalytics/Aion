@@ -248,6 +248,8 @@ def cleanup_old_versions(
         Number of versions deleted
     """
     try:
+        from datetime import timedelta
+        
         index = _load_version_index(model_type)
         versions = index.get("versions", {})
         
@@ -258,10 +260,6 @@ def cleanup_old_versions(
         sorted_dates = sorted(versions.keys(), reverse=True)
         
         # Determine cutoff date
-        cutoff_date = (
-            datetime.now(timezone.utc).date().isoformat()
-        )
-        from datetime import timedelta
         cutoff_date = (
             datetime.now(timezone.utc).date() - timedelta(days=keep_days)
         ).isoformat()

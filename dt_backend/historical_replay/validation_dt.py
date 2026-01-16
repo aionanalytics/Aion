@@ -36,6 +36,10 @@ except Exception:
         print(msg, flush=True)
 
 
+# Expected regime labels
+VALID_REGIME_LABELS = {"TREND_UP", "TREND_DOWN", "RANGE", "HIGH_VOL", "LOW_VOL", "UNKNOWN"}
+
+
 @dataclass
 class ValidationResult:
     """Result of validation checks."""
@@ -210,7 +214,7 @@ def validate_predictions(
             label = regime_dt.get("label")
             confidence = regime_dt.get("confidence")
             
-            if label not in {"TREND_UP", "TREND_DOWN", "RANGE", "HIGH_VOL", "LOW_VOL", "UNKNOWN"}:
+            if label not in VALID_REGIME_LABELS:
                 warnings.append(f"Unexpected regime label: {label}")
             
             if confidence is not None:
