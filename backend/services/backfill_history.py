@@ -634,6 +634,31 @@ def _ensure_symbol_node(rolling: Dict[str, Any], sym_u: str) -> Dict[str, Any]:
 # Main backfill routine (same external API)
 # -------------------------------------------------------------------
 def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int = 8) -> int:
+    """
+    Backfill bars (replay-aware).
+    In replay mode, loads from snapshot instead of fetching.
+    """
+    from backend.services.replay_data_pipeline import is_replay_mode, get_replay_date, load_rolling_for_replay
+    
+    # Replay mode: load from snapshot
+    if is_replay_mode():
+        replay_date = get_replay_date()
+        if not replay_date:
+            log("⚠️ Replay mode enabled but AION_ASOF_DATE not set")
+            return 0
+        
+        log(f"🔄 Replay mode: loading rolling cache from snapshot ({replay_date})")
+        try:
+            rolling = load_rolling_for_replay(replay_date)
+            from backend.core.data_pipeline import save_rolling
+            save_rolling(rolling)
+            log(f"✅ Replay mode: loaded {len(rolling)} symbols from snapshot")
+            return len(rolling)
+        except Exception as e:
+            log(f"❌ Replay mode: failed to load snapshot: {e}")
+            return 0
+    
+    # Live mode: continue with normal backfill logic
     rolling = _read_rolling() or {}
     today = datetime.utcnow().strftime("%Y-%m-%d")
     mode = "full"

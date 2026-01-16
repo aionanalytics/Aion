@@ -246,12 +246,58 @@ def _compute_eta(elapsed_secs: float, done: int, total: int) -> Optional[float]:
 
 
 def _run_one_day(target_day: date) -> Dict[str, Any]:
+    """Run replay for one day using snapshot data."""
+    from backend.historical_replay_swing.snapshot_manager import SnapshotManager
+    from backend.historical_replay_swing.validation import ReplayValidator
+    from backend.core.config import PATHS
+    
+    date_str = target_day.isoformat()
+    
+    # 1. Check snapshot exists
+    try:
+        manager = SnapshotManager(Path(PATHS["swing_replay_snapshots"]))
+        if not manager.snapshot_exists(date_str):
+            return {
+                "status": "error",
+                "error": f"No snapshot for {date_str}. Run snapshot capture first.",
+            }
+        
+        # 2. Load and validate snapshot
+        snapshot = manager.load_snapshot(date_str)
+        validator = ReplayValidator()
+        validation = validator.validate_snapshot(date_str, snapshot)
+        
+        if not validation.valid:
+            return {
+                "status": "error",
+                "validation_errors": validation.errors,
+                "date": date_str,
+            }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": f"Failed to load/validate snapshot: {e}",
+            "date": date_str,
+        }
+    
+    # 3. Set replay mode environment
     os.environ["AION_RUN_MODE"] = "replay"
-    os.environ["AION_ASOF_DATE"] = target_day.isoformat()
-
+    os.environ["AION_ASOF_DATE"] = date_str
+    
+    # 4. Run nightly job (will use snapshot data via replay_data_pipeline)
     from backend.jobs.nightly_job import run_nightly_job
-    res = run_nightly_job(mode="replay", as_of_date=target_day.isoformat(), force=True)
-    return {"day": target_day.isoformat(), "nightly": res}
+    result = run_nightly_job(
+        mode="replay",
+        as_of_date=date_str,
+        force=True,
+    )
+    
+    result["validation"] = {
+        "valid": validation.valid,
+        "warnings": validation.warnings,
+    }
+    
+    return {"day": date_str, "nightly": result}
 
 
 def start_replay(cfg: Optional[ReplayConfig] = None) -> Dict[str, Any]:

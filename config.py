@@ -85,6 +85,7 @@ DT_ROLLING_BRAIN = BRAINS_ROOT / "dt_rolling.json.gz"
 SWING_REPLAY_ROOT = DATA_ROOT / "replay" / "swing"
 SWING_REPLAY_STATE = SWING_REPLAY_ROOT / "replay_state.json"
 SWING_REPLAY_LOCK = DATA_ROOT / "replay" / "locks" / "swing.lock"
+SWING_REPLAY_SNAPSHOTS = SWING_REPLAY_ROOT / "snapshots"
 MAINTENANCE_FLAG = DATA_ROOT / "replay" / "maintenance_mode.json"
 
 # ============================================================
@@ -196,6 +197,7 @@ PATHS: Dict[str, Path] = {
     "swing_replay_root": SWING_REPLAY_ROOT,
     "swing_replay_state": SWING_REPLAY_STATE,
     "swing_replay_lock": SWING_REPLAY_LOCK,
+    "swing_replay_snapshots": SWING_REPLAY_SNAPSHOTS,
     "maintenance_flag": MAINTENANCE_FLAG,
 
     "dt_rolling_brain": DT_ROLLING_BRAIN,

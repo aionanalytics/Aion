@@ -436,6 +436,39 @@ def _risk_off_score(vix_close: float, sp500_pct_dec: float, dxy_pct_dec: float) 
 # ------------------------------------------------------------
 
 def build_macro_features() -> Dict[str, Any]:
+    """
+    Fetch macro signals (replay-aware).
+    In replay mode: loads from snapshot.
+    In live mode: fetches via FRED + Alpaca GLD.
+    """
+    from backend.services.replay_data_pipeline import is_replay_mode, get_replay_date, load_macro_for_replay
+    
+    # Replay mode: load from snapshot
+    if is_replay_mode():
+        replay_date = get_replay_date()
+        if not replay_date:
+            log("[macro_fetcher] ⚠️ Replay mode enabled but AION_ASOF_DATE not set")
+            return {"status": "error", "error": "replay_mode_no_date"}
+        
+        log(f"[macro_fetcher] 🔄 Replay mode: loading macro from snapshot ({replay_date})")
+        try:
+            macro_state = load_macro_for_replay(replay_date)
+            
+            # Write to standard location for other components to use
+            out_path = PATHS.get("macro_state")
+            if out_path:
+                try:
+                    _atomic_write_json(Path(out_path), macro_state)
+                    log(f"[macro_fetcher] ✅ Replay mode: macro_state.json updated from snapshot")
+                except Exception as e:
+                    log(f"[macro_fetcher] ⚠️ Failed to write macro_state.json: {e}")
+            
+            return {"status": "ok", **macro_state}
+        except Exception as e:
+            log(f"[macro_fetcher] ❌ Replay mode: failed to load macro: {e}")
+            return {"status": "error", "error": str(e)}
+    
+    # Live mode: continue with normal fetch logic
     log("🌐 Fetching macro signals via FRED (+ gold via Alpaca GLD)…")
 
     out_path = PATHS.get("macro_state")

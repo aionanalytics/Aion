@@ -210,14 +210,49 @@ def _fetch_fmp_data(sym: str, api_key: str | None) -> Dict[str, Any]:
 
 def enrich_fundamentals() -> Dict[str, Any]:
     """
-    Merge multiple sources:
-        1) StockAnalysis metric tables
-        2) (optional) FMP fundamentals
-        3) (optional) AlphaVantage fundamentals
-
+    Merge multiple sources (replay-aware):
+        1) In replay mode: load from snapshot
+        2) In live mode: fetch from StockAnalysis + FMP
+    
     Integrate into Rolling:
         rolling[sym]["fundamentals"] = merged_fields
     """
+    from backend.services.replay_data_pipeline import is_replay_mode, get_replay_date, load_fundamentals_for_replay
+    
+    # Replay mode: load from snapshot
+    if is_replay_mode():
+        replay_date = get_replay_date()
+        if not replay_date:
+            log("⚠️ Replay mode enabled but AION_ASOF_DATE not set")
+            return {"status": "error", "error": "replay_mode_no_date"}
+        
+        log(f"🔄 Replay mode: loading fundamentals from snapshot ({replay_date})")
+        try:
+            fundamentals = load_fundamentals_for_replay(replay_date)
+            
+            # Apply to rolling
+            rolling = _read_rolling()
+            if not rolling:
+                log("⚠️ No rolling.json.gz in replay mode")
+                return {"status": "error", "error": "no_rolling"}
+            
+            updated = 0
+            for sym, fund_data in fundamentals.items():
+                if sym in rolling:
+                    node = rolling[sym]
+                    if isinstance(node, dict):
+                        node["fundamentals"] = fund_data
+                        rolling[sym] = node
+                        updated += 1
+            
+            save_rolling(rolling)
+            log(f"✅ Replay mode: loaded fundamentals for {updated} symbols from snapshot")
+            return {"status": "ok", "updated": updated, "total": len(fundamentals)}
+        except Exception as e:
+            log(f"❌ Replay mode: failed to load fundamentals: {e}")
+            return {"status": "error", "error": str(e)}
+    
+    # Live mode: continue with normal fetch logic
     rolling = _read_rolling()
     if not rolling:
         log("⚠️ No rolling.json.gz — fundamentals enrichment aborted.")
