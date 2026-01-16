@@ -157,7 +157,42 @@ def _safe_load_booster(model_path: Path) -> Optional[lgb.Booster]:
         return None
 
 
-def _load_lgbm() -> Tuple[Optional[lgb.Booster], Optional[list[str]]]:
+def _load_lgbm(version_date: Optional[str] = None) -> Tuple[Optional[lgb.Booster], Optional[list[str]]]:
+    """
+    Load LightGBM model, optionally from a specific version.
+    
+    Args:
+        version_date: Optional date string (YYYY-MM-DD) to load a specific version.
+                     If None, loads the latest/current model.
+    """
+    # Try loading versioned model if date is specified
+    if version_date:
+        try:
+            from dt_backend.ml.model_version_manager import load_model_version
+            version_dir = load_model_version("lightgbm_intraday", version_date)
+            if version_dir:
+                model_path = version_dir / "model.txt"
+                fmap_path = version_dir / "feature_map.json"
+                
+                if model_path.exists():
+                    booster = _safe_load_booster(model_path)
+                    if booster:
+                        features: Optional[list[str]] = None
+                        try:
+                            if fmap_path.exists():
+                                with fmap_path.open("r", encoding="utf-8") as f:
+                                    features = json.load(f)
+                            else:
+                                features = booster.feature_name()
+                        except Exception:
+                            features = booster.feature_name()
+                        
+                        log(f"[ai_model_intraday] ✅ Loaded LightGBM model version {version_date}")
+                        return booster, features
+        except Exception as e:
+            log(f"[ai_model_intraday] ⚠️ Failed to load versioned model: {e}")
+    
+    # Load current/latest model
     model_dir = get_model_dir("lightgbm_intraday")  # canonical intraday artifact folder
     model_path = model_dir / "model.txt"
     bak_path = model_dir / "model.txt.bak"
@@ -227,8 +262,18 @@ def _load_transformer() -> Any | None:
 
 # ----- Public loader -----
 
-def load_intraday_models() -> LoadedModels:
-    lgb_model, lgb_feats = _load_lgbm()
+def load_intraday_models(version_date: Optional[str] = None) -> LoadedModels:
+    """
+    Load intraday models, optionally from a specific version date.
+    
+    Args:
+        version_date: Optional date string (YYYY-MM-DD) to load versioned models.
+                     If None, loads the latest/current models.
+    
+    Returns:
+        LoadedModels with all available models
+    """
+    lgb_model, lgb_feats = _load_lgbm(version_date=version_date)
     lstm_model = _load_lstm()
     transf_model = _load_transformer()
 
