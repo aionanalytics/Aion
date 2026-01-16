@@ -236,7 +236,16 @@ def _save_model_atomic(booster: lgb.Booster, model_path: Path) -> None:
     _ = lgb.Booster(model_file=str(model_path))
 
 
-def train_lightgbm_intraday() -> Dict[str, Any]:
+def train_lightgbm_intraday(save_version: bool = True) -> Dict[str, Any]:
+    """
+    Train LightGBM intraday model.
+    
+    Args:
+        save_version: If True, save a versioned copy of the model
+    
+    Returns:
+        Summary dict with training info
+    """
     X, y = _load_training_data()
     booster = _train_lgb(X, y)
 
@@ -254,6 +263,28 @@ def train_lightgbm_intraday() -> Dict[str, Any]:
             model_dir / "label_map.json",
             {"label_order": LABEL_ORDER, "label2id": LABEL2ID, "id2label": ID2LABEL},
         )
+        
+        # Save versioned model
+        if save_version:
+            try:
+                from datetime import datetime
+                from dt_backend.ml.model_version_manager import save_model_version
+                
+                date_str = datetime.now().date().isoformat()
+                model_files = {
+                    "model.txt": model_dir / "model.txt",
+                    "feature_map.json": model_dir / "feature_map.json",
+                    "label_map.json": model_dir / "label_map.json",
+                }
+                metadata = {
+                    "n_rows": int(len(X)),
+                    "n_features": int(X.shape[1]),
+                    "trained_at": datetime.now().isoformat(),
+                }
+                save_model_version("lightgbm_intraday", date_str, model_files, metadata)
+                log(f"[train_lightgbm_intraday] ✅ Saved model version for {date_str}")
+            except Exception as e:
+                log(f"[train_lightgbm_intraday] ⚠️ Failed to save model version: {e}")
     finally:
         _release_model_lock(lock)
 
