@@ -95,6 +95,7 @@ async def stream_admin_logs(request: Request):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
         }
     )
 
@@ -106,7 +107,7 @@ async def stream_intraday(request: Request):
     Updates every 5 seconds.
     """
     async def event_generator() -> AsyncGenerator[str, None]:
-        from backend.routers.intraday_router import get_intraday_snapshot
+        from backend.intraday_service import get_intraday_snapshot
         
         try:
             while True:
@@ -126,5 +127,6 @@ async def stream_intraday(request: Request):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
         }
     )
