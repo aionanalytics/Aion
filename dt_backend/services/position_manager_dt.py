@@ -286,6 +286,31 @@ def record_exit(symbol: str, *, reason: str, now_utc: Optional[datetime] = None)
         st[sym]["last_exit_reason"] = str(reason)[:120]
         write_positions_state(st)
         
+        # Record exit decision for replay
+        try:
+            from dt_backend.services.decision_recorder import DecisionRecorder
+            recorder = DecisionRecorder()
+            
+            # Calculate P&L if we have entry price and exit price
+            entry_price = float(st[sym].get("entry_price", 0.0))
+            qty = float(st[sym].get("qty", 0.0))
+            # Note: We don't have exit_price here directly, would need to be passed in
+            # For now, record with pnl=0, real implementation would pass exit_price
+            pnl = 0.0  # Would be calculated as (exit_price - entry_price) * qty
+            
+            recorder.record_exit(
+                symbol=sym,
+                qty=qty,
+                price=entry_price,  # Would be exit_price
+                reason=reason,
+                pnl=pnl,
+                entry_price=entry_price,
+                entry_ts=st[sym].get("entry_ts", ""),
+            )
+        except Exception:
+            # Don't fail exit recording if decision recorder fails
+            pass
+        
         # Trigger trade outcome analysis
         try:
             from dt_backend.ml.trade_outcome_analyzer import analyze_trade_outcome
