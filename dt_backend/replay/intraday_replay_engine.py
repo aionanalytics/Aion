@@ -140,6 +140,11 @@ class IntraDayReplayEngine:
         Returns:
             Simulated P&L after applying modified knobs
         """
+        # Simplified adjustment factors for knob modifications
+        # These are rough estimates - real implementation would use historical data
+        STOP_LOSS_ADJUSTMENT_FACTOR = 0.1   # 10% impact per percentage point
+        TAKE_PROFIT_ADJUSTMENT_FACTOR = 0.05  # 5% impact per percentage point
+        
         replay_pnl = 0.0
         
         # For each original decision, apply modified knobs and recalculate
@@ -152,14 +157,13 @@ class IntraDayReplayEngine:
                 if modified_knobs:
                     # Simulate impact of modified stop_loss_pct
                     if "stop_loss_pct" in modified_knobs:
-                        # Simplified: tighter stop loss might reduce losses
-                        # In reality, would need to check if stop would have been hit
-                        adjustment = modified_knobs["stop_loss_pct"] * 0.1
+                        # Tighter stop loss might reduce losses or cut gains short
+                        adjustment = modified_knobs["stop_loss_pct"] * STOP_LOSS_ADJUSTMENT_FACTOR
                         replay_pnl += original_pnl * (1 + adjustment)
                     # Simulate impact of modified take_profit_pct
                     elif "take_profit_pct" in modified_knobs:
                         # Higher take profit might capture more gains
-                        adjustment = modified_knobs["take_profit_pct"] * 0.05
+                        adjustment = modified_knobs["take_profit_pct"] * TAKE_PROFIT_ADJUSTMENT_FACTOR
                         replay_pnl += original_pnl * (1 + adjustment)
                     else:
                         replay_pnl += original_pnl
@@ -198,11 +202,18 @@ class IntraDayReplayEngine:
             try:
                 with open(result_file, "r", encoding="utf-8") as f:
                     result = json.load(f)
-                    ts = datetime.fromisoformat(result["timestamp"])
-                    if ts > cutoff:
-                        results.append(result)
-            except Exception:
-                # Skip files that can't be parsed
+                    # Safely parse timestamp
+                    ts_str = result.get("timestamp")
+                    if ts_str:
+                        try:
+                            ts = datetime.fromisoformat(ts_str)
+                            if ts > cutoff:
+                                results.append(result)
+                        except (ValueError, TypeError):
+                            # Skip files with invalid timestamps
+                            continue
+            except (json.JSONDecodeError, IOError):
+                # Skip files that can't be parsed or read
                 pass
         
         return results

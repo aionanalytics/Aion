@@ -15,6 +15,9 @@ import json
 from typing import Dict, List, Any, Optional
 import numpy as np
 
+# Constants for numeric stability
+EPSILON = 1e-9  # Small value to prevent division by zero
+
 
 class WalkForwardValidator:
     """Walk-forward validation for DT strategy."""
@@ -186,7 +189,7 @@ class WalkForwardValidator:
         # Calculate max drawdown
         cumulative = np.cumsum(returns)
         running_max = np.maximum.accumulate(cumulative)
-        drawdown = (cumulative - running_max) / (np.abs(running_max) + 1e-9)
+        drawdown = (cumulative - running_max) / (np.abs(running_max) + EPSILON)
         max_drawdown = np.min(drawdown) if len(drawdown) > 0 else 0
         
         return {
