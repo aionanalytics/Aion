@@ -689,6 +689,140 @@ def execute_from_policy(
         except Exception:
             pass
 
+        # ============================================================================
+        # INTELLIGENT POSITION HOLDING (Human Day Trader Logic)
+        # ============================================================================
+        # If we have an open position and signal says SELL, apply hold strategy
+        # instead of immediately exiting. This prevents mechanical "buy cycle N, sell cycle N+1"
+        # behavior and lets winning positions run.
+        try:
+            if pos is not None and getattr(pos, "qty", 0.0) > 0:  # We have a LONG position
+                if side == "SELL":
+                    # Check if BUY signal is still active (different from execution intent)
+                    # Look at raw policy_dt for underlying signal strength
+                    policy = node.get("policy_dt", {})
+                    if isinstance(policy, dict):
+                        raw_intent = str(policy.get("intent") or "").upper()
+                        raw_conf = _safe_float(policy.get("confidence"), 0.0)
+                        
+                        # If BUY signal still active with confidence, HOLD position
+                        if raw_intent == "BUY" and raw_conf >= float(cfg.min_confidence):
+                            blocked += 1
+                            
+                            # Calculate current PnL
+                            entry_price = float(getattr(pos, "avg_price", 0.0))
+                            last_price = _extract_last_price(node)
+                            pnl_pct = 0.0
+                            if entry_price > 0 and last_price > 0:
+                                pnl_pct = ((last_price - entry_price) / entry_price) * 100.0
+                            
+                            # Update position hold tracking
+                            try:
+                                from dt_backend.services.position_manager_dt import update_position_hold_info
+                                update_position_hold_info(
+                                    sym,
+                                    hold_reason="buy_signal_still_active",
+                                    current_pnl_pct=pnl_pct,
+                                    now_utc=ts_now,
+                                )
+                            except Exception:
+                                pass
+                            
+                            append_trade_event({
+                                "type": "position_hold",
+                                "symbol": sym,
+                                "reason": "buy_signal_still_active",
+                                "raw_intent": raw_intent,
+                                "raw_confidence": raw_conf,
+                                "execution_side": side,
+                                "hold_strategy": "signal_active",
+                                "pnl_pct": pnl_pct,
+                            })
+                            continue
+                        
+                        # Check profit/loss for intelligent exit decisions
+                        try:
+                            entry_price = float(getattr(pos, "avg_price", 0.0))
+                            last_price = _extract_last_price(node)
+                            
+                            if entry_price > 0 and last_price > 0:
+                                pnl_pct = ((last_price - entry_price) / entry_price) * 100.0
+                                
+                                # Winning trade (>0.5% gain) - HOLD with trailing stop
+                                # Let winners run, don't exit just because rank dropped
+                                if pnl_pct > 0.5:
+                                    blocked += 1
+                                    
+                                    # Update position hold tracking
+                                    try:
+                                        from dt_backend.services.position_manager_dt import update_position_hold_info
+                                        update_position_hold_info(
+                                            sym,
+                                            hold_reason="winning_trade_let_run",
+                                            current_pnl_pct=pnl_pct,
+                                            now_utc=ts_now,
+                                        )
+                                    except Exception:
+                                        pass
+                                    
+                                    append_trade_event({
+                                        "type": "position_hold",
+                                        "symbol": sym,
+                                        "reason": "winning_trade_let_run",
+                                        "pnl_pct": pnl_pct,
+                                        "entry_price": entry_price,
+                                        "current_price": last_price,
+                                        "hold_strategy": "trail_winner",
+                                    })
+                                    # Trailing stop is handled by position_manager_dt.py
+                                    continue
+                                
+                                # Breakeven or small loss (-1% to 0%) - wait for reversal
+                                # Don't exit on noise, give it a chance to recover
+                                if -1.0 <= pnl_pct <= 0.0:
+                                    # Check time in position
+                                    from dt_backend.services.position_manager_dt import read_positions_state
+                                    pos_state = read_positions_state()
+                                    ps = pos_state.get(sym.upper(), {})
+                                    
+                                    if isinstance(ps, dict):
+                                        entry_ts = _parse_utc_iso(ps.get("entry_ts"))
+                                        if entry_ts is not None:
+                                            hold_minutes = (ts_now - entry_ts).total_seconds() / 60.0
+                                            
+                                            # If held < 15 minutes, give it more time
+                                            if hold_minutes < 15.0:
+                                                blocked += 1
+                                                
+                                                # Update position hold tracking
+                                                try:
+                                                    from dt_backend.services.position_manager_dt import update_position_hold_info
+                                                    update_position_hold_info(
+                                                        sym,
+                                                        hold_reason="breakeven_wait_reversal",
+                                                        current_pnl_pct=pnl_pct,
+                                                        now_utc=ts_now,
+                                                    )
+                                                except Exception:
+                                                    pass
+                                                
+                                                append_trade_event({
+                                                    "type": "position_hold",
+                                                    "symbol": sym,
+                                                    "reason": "breakeven_wait_reversal",
+                                                    "pnl_pct": pnl_pct,
+                                                    "hold_minutes": hold_minutes,
+                                                    "hold_strategy": "wait_reversal",
+                                                })
+                                                continue
+                                
+                                # Large loss (< -1%) - allow exit via stop loss from position_manager
+                                # But also respect hard stops from position_manager_dt
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
         # Don't stack entries in the same direction (keeps it sane).
         try:
             if side == "BUY" and pos is not None and getattr(pos, "qty", 0.0) > 0:

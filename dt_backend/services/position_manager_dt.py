@@ -243,6 +243,12 @@ def record_entry(
         "min_favorable": float(entry_price),
         "meta": meta,
         "confidence": float(confidence) if confidence is not None else None,
+        # Intelligent hold tracking
+        "hold_count": 0,  # Number of cycles position was held instead of exited
+        "last_hold_reason": None,  # Why we held (signal_active, winning_trade, etc)
+        "last_hold_ts": None,  # Last time we decided to hold
+        "max_pnl_pct": 0.0,  # Peak profit percentage achieved
+        "current_pnl_pct": 0.0,  # Current profit/loss percentage
     }
     write_positions_state(st)
 
@@ -306,6 +312,50 @@ def recent_exit_info(symbol: str) -> Tuple[Optional[datetime], str]:
     ts = _parse_iso(st[sym].get("last_exit_ts"))
     side = str(st[sym].get("side") or "").upper()
     return ts, side
+
+
+def update_position_hold_info(
+    symbol: str,
+    *,
+    hold_reason: str,
+    current_pnl_pct: float,
+    now_utc: Optional[datetime] = None,
+) -> None:
+    """Update position state when we decide to hold instead of exit.
+    
+    Tracks intelligent hold decisions for human day trader behavior.
+    """
+    st = read_positions_state()
+    sym = str(symbol).upper().strip()
+    
+    if sym not in st or not isinstance(st[sym], dict):
+        return
+    
+    ps = st[sym]
+    ts = _utc_iso(now_utc)
+    
+    # Increment hold count
+    ps["hold_count"] = int(ps.get("hold_count", 0)) + 1
+    ps["last_hold_reason"] = str(hold_reason)[:120]
+    ps["last_hold_ts"] = ts
+    ps["current_pnl_pct"] = float(current_pnl_pct)
+    
+    # Track peak PnL for trailing
+    max_pnl = float(ps.get("max_pnl_pct", 0.0))
+    ps["max_pnl_pct"] = max(max_pnl, float(current_pnl_pct))
+    
+    st[sym] = ps
+    write_positions_state(st)
+    
+    append_trade_event({
+        "ts": ts,
+        "type": "position_hold_update",
+        "symbol": sym,
+        "hold_reason": hold_reason,
+        "hold_count": ps["hold_count"],
+        "current_pnl_pct": current_pnl_pct,
+        "max_pnl_pct": ps["max_pnl_pct"],
+    })
 
 
 def _clear_position_dt(rolling: Dict[str, Any], sym: str, now_utc: Optional[datetime] = None) -> None:
