@@ -1,13 +1,22 @@
-"""dt_backend/services/dt_truth_store.py — v0.2 (Phase 0)
+"""dt_backend/services/dt_truth_store.py — v0.3 (Phase 0 + Unified Truth Store)
 
 Truth + safety helpers for dt_backend.
+
+UPDATED: Now wraps SharedTruthStore for unified logging:
+  - All DT trades go to shared_trades.jsonl with source="dt"
+  - Backward compatible API maintained
+  - State and metrics remain DT-specific
+  - Enables cross-strategy analysis (swing vs DT)
 
 This module intentionally avoids external dependencies.
 
 Artifacts (append-only or atomic replace):
   • dt_state.json     — current regime/risk/bots/kill-switches snapshot
-  • dt_trades.jsonl   — append-only event log (decisions, no-trade reasons, orders, fills)
+  • dt_trades.jsonl   — DEPRECATED: now forwards to shared store
   • dt_metrics.json   — rolling metrics snapshot (equity, positions, realized pnl, counters)
+
+Shared artifacts (written under da_brains/shared):
+  • shared_trades.jsonl — unified trades from swing + DT
 
 Locking:
   • dt_scheduler.lock — prevents multiple dt_scheduler processes from running.
@@ -31,6 +40,14 @@ from dt_backend.core.logger_dt import log
 from dt_backend.core.time_override_dt import utc_iso
 from dt_backend.core.file_locking import AppendLocked
 
+# Import shared truth store for unified logging
+try:
+    from backend.services.shared_truth_store import get_shared_store
+except Exception:  # pragma: no cover
+    # Fallback if shared store not available
+    def get_shared_store():  # type: ignore
+        return None
+
 # DT_PATHS source: prefer config_dt; fall back gracefully if core exports it.
 try:
     from dt_backend.core.config_dt import DT_PATHS  # type: ignore
@@ -39,6 +56,12 @@ except Exception:  # pragma: no cover
         from dt_backend.core import DT_PATHS  # type: ignore
     except Exception:  # pragma: no cover
         DT_PATHS = {}  # type: ignore
+
+
+# Shared store event field exclusions (for forwarding events)
+_SHARED_STORE_TRADE_FIELDS = {"source", "symbol", "side", "qty", "price", "reason", "pnl", "realized_pnl", "ts"}
+_SHARED_STORE_SIGNAL_FIELDS = {"type", "source", "symbol", "signal_type", "confidence", "ts"}
+_SHARED_STORE_NO_TRADE_FIELDS = {"type", "source", "symbol", "reason", "ts"}
 
 
 def _utc_iso() -> str:
@@ -284,11 +307,52 @@ def read_dt_state() -> Dict[str, Any]:
 
 
 def append_trade_event(event: Dict[str, Any]) -> None:
+    """Append one event line to shared truth store.
+    
+    Now writes to shared_trades.jsonl with source="dt" for unified logging.
+    Also maintains local dt_trades.jsonl for backward compatibility.
+    """
     """Append one event line to dt_trades.jsonl with file locking."""
     try:
         if not isinstance(event, dict):
             return
         event.setdefault("ts", _utc_iso())
+        
+        # Write to shared truth store with source="dt"
+        shared_store = get_shared_store()
+        if shared_store is not None:
+            # Determine event type
+            event_type = event.get("type", "trade")
+            
+            if event_type in {"trade", "order_submitted", "bracket_set", "fill_exit", "exit"} and "symbol" in event:
+                # Normalize to trade event
+                shared_store.append_trade_event(
+                    source="dt",
+                    symbol=event.get("symbol", ""),
+                    side=event.get("side", ""),
+                    qty=event.get("qty", 0.0),
+                    price=event.get("price", 0.0),
+                    reason=event.get("reason", ""),
+                    pnl=event.get("pnl") or event.get("realized_pnl"),
+                    **{k: v for k, v in event.items() if k not in _SHARED_STORE_TRADE_FIELDS}
+                )
+            elif event_type == "signal" and "symbol" in event:
+                shared_store.append_signal_event(
+                    source="dt",
+                    symbol=event.get("symbol", ""),
+                    signal_type=event.get("signal_type", ""),
+                    confidence=event.get("confidence"),
+                    **{k: v for k, v in event.items() if k not in _SHARED_STORE_SIGNAL_FIELDS}
+                )
+            elif event_type == "no_trade" and "symbol" in event:
+                shared_store.append_no_trade_event(
+                    source="dt",
+                    symbol=event.get("symbol", ""),
+                    reason=event.get("reason", ""),
+                    **{k: v for k, v in event.items() if k not in _SHARED_STORE_NO_TRADE_FIELDS}
+                )
+        
+        # Also write to local file for backward compatibility
         p = trades_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         

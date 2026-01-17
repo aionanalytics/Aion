@@ -1,6 +1,12 @@
-"""backend.services.swing_truth_store — v0.1 (Swing Phase 0)
+"""backend.services.swing_truth_store — v0.2 (Unified Truth Store)
 
 Truth + safety helpers for *swing* execution.
+
+UPDATED: Now wraps SharedTruthStore for unified logging:
+  - All swing trades go to shared_trades.jsonl with source="swing"
+  - Backward compatible API maintained
+  - State and metrics remain swing-specific
+  - Enables cross-strategy analysis (swing vs DT)
 
 This mirrors dt_backend's Phase 0 philosophy:
   - Deterministic artifacts
@@ -9,8 +15,11 @@ This mirrors dt_backend's Phase 0 philosophy:
 
 Artifacts (written under a swing truth dir):
   • swing_state.json       — latest snapshot (risk/bots/regime/etc.)
-  • swing_trades.jsonl     — append-only decision + execution + no-trade log
+  • swing_trades.jsonl     — DEPRECATED: now forwards to shared store
   • swing_metrics.json     — lightweight counters + optional snapshots
+
+Shared artifacts (written under da_brains/shared):
+  • shared_trades.jsonl    — unified trades from swing + DT
 
 Override
 --------
@@ -41,6 +50,20 @@ try:
 except Exception:  # pragma: no cover
     def log(msg: str) -> None:  # type: ignore
         print(msg)
+
+# Import shared truth store for unified logging
+try:
+    from backend.services.shared_truth_store import get_shared_store
+except Exception:  # pragma: no cover
+    # Fallback if shared store not available
+    def get_shared_store():  # type: ignore
+        return None
+
+
+# Shared store event field exclusions (for forwarding events)
+_SHARED_STORE_TRADE_FIELDS = {"type", "source", "symbol", "side", "qty", "price", "reason", "pnl", "ts"}
+_SHARED_STORE_SIGNAL_FIELDS = {"type", "source", "symbol", "signal_type", "confidence", "ts"}
+_SHARED_STORE_NO_TRADE_FIELDS = {"type", "source", "symbol", "reason", "ts"}
 
 
 def _utc_iso() -> str:
@@ -111,11 +134,50 @@ def update_swing_state(patch: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def append_swing_event(event: Dict[str, Any]) -> None:
-    """Append a single JSONL event line."""
+    """Append a single JSONL event line to shared truth store.
+    
+    Now writes to shared_trades.jsonl with source="swing" for unified logging.
+    Also maintains local swing_trades.jsonl for backward compatibility.
+    """
     try:
         if not isinstance(event, dict):
             return
         event.setdefault("ts", _utc_iso())
+        
+        # Write to shared truth store with source="swing"
+        shared_store = get_shared_store()
+        if shared_store is not None:
+            # Determine event type
+            event_type = event.get("type", "trade")
+            
+            if event_type == "trade" and "symbol" in event:
+                shared_store.append_trade_event(
+                    source="swing",
+                    symbol=event.get("symbol", ""),
+                    side=event.get("side", ""),
+                    qty=event.get("qty", 0.0),
+                    price=event.get("price", 0.0),
+                    reason=event.get("reason", ""),
+                    pnl=event.get("pnl"),
+                    **{k: v for k, v in event.items() if k not in _SHARED_STORE_TRADE_FIELDS}
+                )
+            elif event_type == "signal" and "symbol" in event:
+                shared_store.append_signal_event(
+                    source="swing",
+                    symbol=event.get("symbol", ""),
+                    signal_type=event.get("signal_type", ""),
+                    confidence=event.get("confidence"),
+                    **{k: v for k, v in event.items() if k not in _SHARED_STORE_SIGNAL_FIELDS}
+                )
+            elif event_type == "no_trade" and "symbol" in event:
+                shared_store.append_no_trade_event(
+                    source="swing",
+                    symbol=event.get("symbol", ""),
+                    reason=event.get("reason", ""),
+                    **{k: v for k, v in event.items() if k not in _SHARED_STORE_NO_TRADE_FIELDS}
+                )
+        
+        # Also write to local file for backward compatibility
         p = trades_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         with open(p, "a", encoding="utf-8") as f:
