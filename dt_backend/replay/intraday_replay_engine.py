@@ -66,7 +66,7 @@ class IntraDayReplayEngine:
         original_pnl = self._calculate_cycle_pnl(original_decisions)
         
         # Create replay ID
-        replay_id = str(uuid.uuid4()).hex[:12]
+        replay_id = uuid.uuid4().hex[:12]
         
         # Simulate replay with modified knobs
         # In a real implementation, this would re-execute using modified parameters

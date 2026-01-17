@@ -21,7 +21,7 @@ class DecisionRecorder:
         ml_data_dt = Path(PATHS.get("ml_data_dt", "ml_data_dt"))
         ml_data_dt.mkdir(parents=True, exist_ok=True)
         self.decisions_file = ml_data_dt / "dt_decisions.jsonl"
-        self.current_cycle_id = str(uuid.uuid4()).hex[:12]
+        self.current_cycle_id = uuid.uuid4().hex[:12]
     
     def start_cycle(self, cycle_id: Optional[str] = None) -> str:
         """Start recording a new cycle.
@@ -32,7 +32,7 @@ class DecisionRecorder:
         Returns:
             The cycle ID for this recording session.
         """
-        self.current_cycle_id = cycle_id or str(uuid.uuid4()).hex[:12]
+        self.current_cycle_id = cycle_id or uuid.uuid4().hex[:12]
         return self.current_cycle_id
     
     def record_decision(
