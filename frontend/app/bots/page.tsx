@@ -110,6 +110,16 @@ type BotDraft = EodBotConfig & {
 };
 
 // -----------------------------
+// Constants
+// -----------------------------
+
+// Cache keys for client-side caching (used with SSE invalidation)
+const CACHE_KEYS = {
+  BOTS_PAGE_BACKEND: "api:/api/backend/bots/page",
+  BOTS_PAGE_DIRECT: "api:/api/bots/page",
+} as const;
+
+// -----------------------------
 // Small helpers
 // -----------------------------
 
@@ -830,8 +840,8 @@ export default function BotsPage() {
       
       // Invalidate client-side cache when SSE pushes new data
       // This ensures fresh data on next fetch if user switches to polling
-      invalidateCache("api:/api/backend/bots/page");
-      invalidateCache("api:/api/bots/page");
+      invalidateCache(CACHE_KEYS.BOTS_PAGE_BACKEND);
+      invalidateCache(CACHE_KEYS.BOTS_PAGE_DIRECT);
     },
     onError: () => {
       // Fallback to polling on SSE error

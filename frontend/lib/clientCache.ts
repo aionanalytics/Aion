@@ -159,7 +159,7 @@ export async function fetchWithCache<T>(
 
   if (!response.ok) {
     throw new Error(
-      `Fetch failed: ${response.status} ${response.statusText}`
+      `Fetch failed for ${url}: ${response.status} ${response.statusText}`
     );
   }
 
@@ -170,4 +170,3 @@ export async function fetchWithCache<T>(
 
   return data;
 }
-
