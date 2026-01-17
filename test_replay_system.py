@@ -171,7 +171,7 @@ def main():
         print("✅ ALL TESTS PASSED!")
         print("="*60)
         print("\nNext steps:")
-        print("1. Start the FastAPI server: uvicorn dt_backend.fastapi_main:app --port 8010")
+        print("1. Start the FastAPI server: uvicorn dt_backend.api.app:app --port 8010")
         print("2. Test API endpoints:")
         print("   - POST /api/replay/cycle/{cycle_id}")
         print("   - GET  /api/replay/results")

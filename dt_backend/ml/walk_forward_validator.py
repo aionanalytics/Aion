@@ -26,8 +26,10 @@ class WalkForwardValidator:
             window_days: Size of each test window in days
             lookback_days: Size of training window in days (before test window)
         """
-        from backend.core.config import PATHS
-        ml_data_dt = Path(PATHS.get("ml_data_dt", "ml_data_dt"))
+        from dt_backend.core.config_dt import DT_PATHS
+        ml_data_dt = DT_PATHS.get("ml_data_dt", Path("ml_data_dt"))
+        if not isinstance(ml_data_dt, Path):
+            ml_data_dt = Path(ml_data_dt)
         self.wf_results_dir = ml_data_dt / "walk_forward_results"
         self.wf_results_dir.mkdir(parents=True, exist_ok=True)
         self.window_days = window_days

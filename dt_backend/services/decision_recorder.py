@@ -17,8 +17,10 @@ class DecisionRecorder:
     """Records all intraday trading decisions for replay/analysis."""
     
     def __init__(self):
-        from backend.core.config import PATHS
-        ml_data_dt = Path(PATHS.get("ml_data_dt", "ml_data_dt"))
+        from dt_backend.core.config_dt import DT_PATHS
+        ml_data_dt = DT_PATHS.get("ml_data_dt", Path("ml_data_dt"))
+        if not isinstance(ml_data_dt, Path):
+            ml_data_dt = Path(ml_data_dt)
         ml_data_dt.mkdir(parents=True, exist_ok=True)
         self.decisions_file = ml_data_dt / "dt_decisions.jsonl"
         self.current_cycle_id = uuid.uuid4().hex[:12]

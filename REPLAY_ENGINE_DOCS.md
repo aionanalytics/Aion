@@ -296,7 +296,14 @@ for d in decisions:
 ## Future Enhancements
 
 1. **Enhanced Replay Simulation**: Use actual historical market data for more accurate replay
-2. **Parameter Optimization**: Auto-tune knobs based on historical performance
-3. **Real-time Monitoring**: Track live trading vs optimal replay in real-time
-4. **ML Integration**: Train models to suggest optimal knobs based on regime
-5. **Multi-Cycle Analysis**: Analyze patterns across multiple cycles
+2. **Complete P&L Tracking**: Integrate exit price capture in position_manager_dt.record_exit() for accurate P&L in decision logs
+3. **Parameter Optimization**: Auto-tune knobs based on historical performance
+4. **Real-time Monitoring**: Track live trading vs optimal replay in real-time
+5. **ML Integration**: Train models to suggest optimal knobs based on regime
+6. **Multi-Cycle Analysis**: Analyze patterns across multiple cycles
+
+## Known Limitations
+
+1. **Exit P&L Recording**: Currently, `position_manager_dt.record_exit()` doesn't receive the actual exit price, so P&L is recorded as 0.0 in the decision log. This can be enhanced by modifying the function signature to accept `exit_price` and calculating real P&L: `(exit_price - entry_price) * qty`.
+
+2. **Replay Simulation**: The replay engine uses simplified P&L adjustment based on knob modifications. For production use, integrate actual historical market data to simulate realistic fills and slippage.
