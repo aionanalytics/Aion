@@ -70,7 +70,8 @@ export default function TestButton({ testName, endpoint, category }: TestButtonP
         setResult(testResult);
         setState(isSuccess ? "pass" : "fail");
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : "Unknown error";
       setResult({
         test_name: testName,
         status: "fail",
@@ -78,7 +79,7 @@ export default function TestButton({ testName, endpoint, category }: TestButtonP
         response_time_ms: 0,
         timestamp: new Date().toISOString(),
         message: "Failed to reach backend",
-        error: error?.message || "Unknown error",
+        error: errorMessage,
       });
       setState("fail");
     }

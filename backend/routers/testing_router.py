@@ -7,6 +7,7 @@ detailed results including response time and status.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict
@@ -15,6 +16,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.monitoring.alerting import send_alert
+
+# Import router functions at module level for better performance
+from backend.routers.health_router import health_check
+from backend.routers.eod_bots_router import eod_status
+from backend.routers.intraday_router import api_intraday_snapshot
+from backend.routers.live_prices_router import api_live_prices
+from backend.routers.dashboard_router import dashboard_metrics
 
 router = APIRouter(prefix="/api/testing", tags=["testing"])
 
@@ -69,9 +77,6 @@ def test_health_endpoint() -> TestResult:
     test_name = "Health Check"
     
     try:
-        # Import and call health check
-        from backend.routers.health_router import health_check
-        
         result = health_check()
         response_time_ms = (time.time() - start_time) * 1000
         
@@ -114,10 +119,6 @@ def test_eod_status_endpoint() -> TestResult:
     test_name = "EOD Bot Status"
     
     try:
-        # Import and call EOD bots endpoint
-        from backend.routers.eod_bots_router import eod_status
-        import asyncio
-        
         # Run async function
         result = asyncio.run(eod_status())
         response_time_ms = (time.time() - start_time) * 1000
@@ -157,9 +158,6 @@ def test_intraday_snapshot_endpoint() -> TestResult:
     test_name = "Intraday Snapshot"
     
     try:
-        # Import and call intraday snapshot
-        from backend.routers.intraday_router import api_intraday_snapshot
-        
         result = api_intraday_snapshot(limit=10)
         response_time_ms = (time.time() - start_time) * 1000
         
@@ -198,10 +196,6 @@ def test_live_prices_endpoint() -> TestResult:
     test_name = "Live Prices"
     
     try:
-        # Import and call live prices
-        from backend.routers.live_prices_router import api_live_prices
-        import asyncio
-        
         result = asyncio.run(api_live_prices(symbols=None, limit=10, include_intraday=False))
         response_time_ms = (time.time() - start_time) * 1000
         
@@ -240,9 +234,6 @@ def test_dashboard_endpoint() -> TestResult:
     test_name = "Dashboard Metrics"
     
     try:
-        # Import and call dashboard metrics
-        from backend.routers.dashboard_router import dashboard_metrics
-        
         result = dashboard_metrics()
         response_time_ms = (time.time() - start_time) * 1000
         
