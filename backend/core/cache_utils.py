@@ -1,5 +1,17 @@
 """
 Caching utilities for performance optimization.
+
+DEPRECATION NOTICE:
+The @timed_lru_cache decorator has been removed from FastAPI route handlers
+due to incompatibility with async/await behavior. Using cache decorators on
+async routes can block the event loop and cause 502 errors, silent failures,
+and stale data issues.
+
+For real-time endpoints, rely on SSE (Server-Sent Events) and client-side
+data fetching instead of backend caching.
+
+This module is kept for backward compatibility with non-route functions,
+but use with caution on any async code paths.
 """
 
 from __future__ import annotations

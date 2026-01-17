@@ -220,7 +220,9 @@ Layer 4: Emergency Stop
 
 ## API Architecture
 
-### Backend API (Ports 8000/8001)
+### Backend API (Port 8000)
+
+**Note:** Port 8000 is the unified port for all backend endpoints. Previously, the backend used dual ports (8000 and 8001), but this has been consolidated to avoid confusion and routing issues.
 
 ```
 /health                    # Health check
@@ -231,6 +233,7 @@ Layer 4: Emergency Stop
 /api/live-prices          # Real-time prices
 /api/eod-bots             # EOD bot status
 /api/models               # Model metrics
+/api/bots/page            # Unified bots page data (no caching)
 ```
 
 ### DT Backend API (Port 8010)

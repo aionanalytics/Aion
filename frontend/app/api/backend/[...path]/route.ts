@@ -1,7 +1,7 @@
 /**
  * Next.js API Route: /api/backend/[...path]
  * 
- * This proxy forwards frontend requests to the main backend server (EOD/Nightly).
+ * This proxy forwards frontend requests to the main backend server.
  * 
  * Routing Logic:
  * - Dashboard routes (/dashboard/*) → forward as-is (no /api prefix)
@@ -9,9 +9,12 @@
  * - All other routes → prepend '/api' to path
  * 
  * Example transformations:
- * - /api/backend/bots/page → http://backend:8001/api/bots/page
- * - /api/backend/dashboard/metrics → http://backend:8001/dashboard/metrics
- * - /api/backend/admin/login → http://backend:8001/admin/login
+ * - /api/backend/bots/page → http://backend:8000/api/bots/page
+ * - /api/backend/dashboard/metrics → http://backend:8000/dashboard/metrics
+ * - /api/backend/admin/login → http://backend:8000/admin/login
+ * 
+ * Note: Port consolidation - backend now uses unified port 8000
+ * (previously split between 8000 and 8001).
  */
 
 import { NextRequest, NextResponse } from "next/server";

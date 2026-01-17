@@ -38,13 +38,14 @@ python run_backend.py
 ```
 
 The platform will start:
-- **Backend API** (port 8000) - Nightly EOD intelligence
-- **Backend UI** (port 8001) - Fast read endpoints
+- **Backend API** (port 8000) - Unified backend for all endpoints
 - **DT Backend API** (port 8010) - Intraday trading
 - **DT Scheduler** - Live market data loop
 - **Replay Service** (port 8020) - Historical replay
 
-Access the dashboard at `http://localhost:8001`
+Access the dashboard at `http://localhost:8000`
+
+**Note:** Port consolidation - Backend now uses unified port 8000 for all endpoints. The previous dual-port setup (8000/8001) has been deprecated to avoid confusion and routing issues.
 
 ---
 
@@ -269,7 +270,9 @@ Aion_Analytics/
 
 ## API Documentation
 
-### Backend API (Port 8000/8001)
+### Backend API (Port 8000)
+
+**Unified Backend** - All endpoints now run on port 8000 (previously split across 8000/8001).
 
 #### System Status
 - `GET /health` - System health check

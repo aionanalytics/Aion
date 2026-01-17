@@ -201,10 +201,7 @@ def shutdown_process(p: Optional[subprocess.Popen], name: str = ""):
 
 if __name__ == "__main__":
     backend_host = _normalize_bind_host(os.environ.get("APP_HOST", "0.0.0.0"))
-    primary_port = os.environ.get("APP_PORT", "8000")  # ✅ primary owns everything
-
-    ui_host = _normalize_bind_host(os.environ.get("UI_HOST", backend_host))
-    ui_port = os.environ.get("UI_PORT", "8001")        # ✅ UI helper only
+    primary_port = os.environ.get("APP_PORT", "8000")  # ✅ unified port for all backend endpoints
 
     dt_host = _normalize_bind_host(os.environ.get("DT_APP_HOST", "0.0.0.0"))
     dt_port = os.environ.get("DT_APP_PORT", "8010")
@@ -216,17 +213,15 @@ if __name__ == "__main__":
     UVICORN_ACCESS_LOG = _env_bool("UVICORN_ACCESS_LOG", default=False)
     UVICORN_RELOAD = _env_bool("UVICORN_RELOAD", default=False)
 
-    # ✅ Your exact requirement:
-    PRIMARY_WORKERS = 1
-    UI_WORKERS = _env_int("UI_WORKERS", 2)  # only for UI speed
+    # ✅ Single backend process with multiple workers for performance
+    PRIMARY_WORKERS = _env_int("APP_WORKERS", 2)
 
     DT_WORKERS = _env_int("DT_APP_WORKERS", 1)
     REPLAY_WORKERS = _env_int("REPLAY_APP_WORKERS", 1)
 
     print("────────────────────────────────────────")
     print("🚀 Launching AION Analytics system")
-    print(f"   • backend PRIMARY   → http://{backend_host}:{primary_port} (workers={PRIMARY_WORKERS}, owns scheduler/nightly/heartbeat)")
-    print(f"   • backend UI helper → http://{ui_host}:{ui_port} (workers={UI_WORKERS}, READ/FAST only)")
+    print(f"   • backend API       → http://{backend_host}:{primary_port} (workers={PRIMARY_WORKERS}, unified port)")
     print(f"   • dt_backend        → http://{dt_host}:{dt_port} (workers={DT_WORKERS})")
     print(f"   • replay_service    → http://{replay_host}:{replay_port} (dormant, workers={REPLAY_WORKERS})")
     if _should_silence_supervisor_agent():
@@ -236,7 +231,7 @@ if __name__ == "__main__":
     append_log("AION system starting")
     prune_old_logs()
 
-    # ✅ 1) PRIMARY backend (clean + single-owner)
+    # ✅ Unified backend process (single port, multiple workers)
     backend_primary_proc = launch(
         uvicorn_cmd(
             "backend.backend_service:app",
@@ -247,41 +242,17 @@ if __name__ == "__main__":
             reload=UVICORN_RELOAD,
             workers=PRIMARY_WORKERS,
         ),
-        "backend_primary",
+        "backend",
         env_overrides={
             "AION_ROLE": "primary",
             "QUIET_STARTUP": "0",
             "ENABLE_SCHEDULER": "1",
             "ENABLE_HEARTBEAT": "1",
             "ENABLE_CLOUDSYNC": "1",
-            # This is where UI-helper forwards heavy tasks
             "PRIMARY_BACKEND_URL": f"http://127.0.0.1:{primary_port}",
         },
     )
-    threading.Thread(target=pipe_output, args=(backend_primary_proc, "backend_primary"), daemon=True).start()
-
-    # ✅ 2) UI helper backend (2 workers, QUIET, NO background threads)
-    backend_ui_proc = launch(
-        uvicorn_cmd(
-            "backend.backend_service:app",
-            ui_host,
-            ui_port,
-            log_level=UVICORN_LOG_LEVEL,
-            access_log=UVICORN_ACCESS_LOG,
-            reload=UVICORN_RELOAD,
-            workers=UI_WORKERS,
-        ),
-        "backend_ui",
-        env_overrides={
-            "AION_ROLE": "ui",
-            "QUIET_STARTUP": "1",
-            "ENABLE_SCHEDULER": "0",
-            "ENABLE_HEARTBEAT": "0",
-            "ENABLE_CLOUDSYNC": "0",
-            "PRIMARY_BACKEND_URL": f"http://127.0.0.1:{primary_port}",
-        },
-    )
-    threading.Thread(target=pipe_output, args=(backend_ui_proc, "backend_ui"), daemon=True).start()
+    threading.Thread(target=pipe_output, args=(backend_primary_proc, "backend"), daemon=True).start()
 
     # DT backend API
     dt_proc = launch(
@@ -325,10 +296,7 @@ if __name__ == "__main__":
     try:
         while True:
             if backend_primary_proc.poll() is not None:
-                raise RuntimeError("backend PRIMARY process exited")
-
-            if backend_ui_proc.poll() is not None:
-                raise RuntimeError("backend UI helper process exited")
+                raise RuntimeError("backend process exited")
 
             if dt_proc.poll() is not None:
                 raise RuntimeError("dt_backend (API) process exited")
@@ -359,7 +327,6 @@ if __name__ == "__main__":
         shutdown_process(replay_proc, "replay_service")
         shutdown_process(dt_worker_proc, dt_worker_name)
         shutdown_process(dt_proc, "dt_backend")
-        shutdown_process(backend_ui_proc, "backend_ui")
-        shutdown_process(backend_primary_proc, "backend_primary")
+        shutdown_process(backend_primary_proc, "backend")
         time.sleep(2)
         append_log("AION system stopped")
