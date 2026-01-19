@@ -71,6 +71,36 @@ function fmtPct(x: number) {
 }
 
 /**
+ * Calculate total equity from all enabled bots.
+ */
+function calculateTotalBotEquity(backendData: any): number {
+  let totalEquity = 0;
+  
+  try {
+    const swingBots = backendData?.data?.bots?.swing?.status?.bots || {};
+    const intradayBots = backendData?.data?.bots?.intraday?.status?.bots || {};
+    
+    for (const [botName, botData] of Object.entries(swingBots)) {
+      const bot = botData as any;
+      if (bot?.enabled && typeof bot?.equity === 'number') {
+        totalEquity += bot.equity;
+      }
+    }
+    
+    for (const [botName, botData] of Object.entries(intradayBots)) {
+      const bot = botData as any;
+      if (bot?.enabled && typeof bot?.equity === 'number') {
+        totalEquity += bot.equity;
+      }
+    }
+  } catch (err) {
+    console.error("Error calculating bot equity:", err);
+  }
+  
+  return totalEquity;
+}
+
+/**
  * Extract equity curve data from backend unified cache.
  */
 function extractEquityCurve(data: any, range: RangeKey): EquityPoint[] {
@@ -79,14 +109,13 @@ function extractEquityCurve(data: any, range: RangeKey): EquityPoint[] {
   try {
     // Get swing bots equity data
     const swingBots = data?.data?.bots?.swing?.status?.bots || {};
-    const intradayBots = data?.data?.bots?.intraday?.status?.bots || {};
     
     // Collect all equity curves from enabled swing bots
     const equityCurves: Array<{ t: string; value: number }[]> = [];
     
     for (const [botName, botData] of Object.entries(swingBots)) {
       const bot = botData as any;
-      if (bot?.enabled && bot?.equity_curve && Array.isArray(bot.equity_curve)) {
+      if (bot?.enabled && bot?.equity_curve && Array.isArray(bot.equity_curve) && bot.equity_curve.length > 0) {
         equityCurves.push(bot.equity_curve);
       }
     }
@@ -94,7 +123,7 @@ function extractEquityCurve(data: any, range: RangeKey): EquityPoint[] {
     // If we have equity curves, combine them
     if (equityCurves.length > 0) {
       // Use the longest curve as base
-      const longestCurve = equityCurves.reduce((a, b) => a.length > b.length ? a : b, []);
+      const longestCurve = equityCurves.reduce((a, b) => a.length > b.length ? a : b, equityCurves[0]);
       
       // Convert to our format
       for (const point of longestCurve) {
@@ -105,23 +134,7 @@ function extractEquityCurve(data: any, range: RangeKey): EquityPoint[] {
       }
     } else {
       // If no equity curves, use current equity values
-      let totalEquity = 0;
-      
-      // Sum swing bot equities
-      for (const [botName, botData] of Object.entries(swingBots)) {
-        const bot = botData as any;
-        if (bot?.enabled && typeof bot?.equity === 'number') {
-          totalEquity += bot.equity;
-        }
-      }
-      
-      // Sum intraday bot equities
-      for (const [botName, botData] of Object.entries(intradayBots)) {
-        const bot = botData as any;
-        if (bot?.enabled && typeof bot?.equity === 'number') {
-          totalEquity += bot.equity;
-        }
-      }
+      const totalEquity = calculateTotalBotEquity(data);
       
       // Create a simple point
       if (totalEquity > 0) {
@@ -293,28 +306,8 @@ export default function ProfilePage() {
     const cash = 0; // TODO: Get from backend when available
     const invested = holdings.reduce((acc, h) => acc + h.qty * h.last, 0);
     
-    // Calculate total equity from bots
-    let totalBotEquity = 0;
-    try {
-      const swingBots = backendData?.data?.bots?.swing?.status?.bots || {};
-      const intradayBots = backendData?.data?.bots?.intraday?.status?.bots || {};
-      
-      for (const [botName, botData] of Object.entries(swingBots)) {
-        const bot = botData as any;
-        if (bot?.enabled && typeof bot?.equity === 'number') {
-          totalBotEquity += bot.equity;
-        }
-      }
-      
-      for (const [botName, botData] of Object.entries(intradayBots)) {
-        const bot = botData as any;
-        if (bot?.enabled && typeof bot?.equity === 'number') {
-          totalBotEquity += bot.equity;
-        }
-      }
-    } catch (err) {
-      console.error("Error calculating bot equity:", err);
-    }
+    // Calculate total equity from bots using helper
+    const totalBotEquity = calculateTotalBotEquity(backendData);
     
     const total = totalBotEquity > 0 ? totalBotEquity : cash + invested;
 
