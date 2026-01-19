@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 
 import json
+import subprocess
 import sys
 import time
 import traceback
@@ -749,8 +750,6 @@ def run_nightly_job(
         _phase(title, 19, TOTAL_PHASES)
         t0 = time.time()
         try:
-            import subprocess
-            
             bots = ["1w", "2w", "4w"]
             results = {}
             

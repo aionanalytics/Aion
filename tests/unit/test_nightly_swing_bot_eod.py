@@ -43,6 +43,9 @@ class TestSwingBotEODPhase:
     @patch('subprocess.run')
     def test_swing_bot_execution_success(self, mock_subprocess):
         """Test successful execution of all swing bots."""
+        import sys
+        from pathlib import Path
+        
         # Mock successful subprocess runs
         mock_proc = Mock()
         mock_proc.returncode = 0
@@ -54,7 +57,7 @@ class TestSwingBotEODPhase:
         
         for bot in bots:
             cmd = [
-                "/usr/bin/python", "-u", "-m",
+                sys.executable, "-u", "-m",
                 f"backend.bots.runner_{bot}",
                 "--mode", "full"
             ]
@@ -79,6 +82,9 @@ class TestSwingBotEODPhase:
     @patch('subprocess.run')
     def test_swing_bot_execution_timeout(self, mock_subprocess):
         """Test timeout handling for swing bots."""
+        import sys
+        from pathlib import Path
+        
         # Mock timeout
         mock_subprocess.side_effect = subprocess.TimeoutExpired(cmd="test", timeout=600)
         
@@ -89,7 +95,7 @@ class TestSwingBotEODPhase:
         for bot in bots:
             try:
                 cmd = [
-                    "/usr/bin/python", "-u", "-m",
+                    sys.executable, "-u", "-m",
                     f"backend.bots.runner_{bot}",
                     "--mode", "full"
                 ]
@@ -115,6 +121,9 @@ class TestSwingBotEODPhase:
     @patch('subprocess.run')
     def test_swing_bot_execution_partial_failure(self, mock_subprocess):
         """Test partial failure scenario (some bots succeed, some fail)."""
+        import sys
+        from pathlib import Path
+        
         # Mock mixed results: success, failure, success
         return_values = [
             Mock(returncode=0),  # 1w succeeds
@@ -130,7 +139,7 @@ class TestSwingBotEODPhase:
         for bot in bots:
             try:
                 cmd = [
-                    "/usr/bin/python", "-u", "-m",
+                    sys.executable, "-u", "-m",
                     f"backend.bots.runner_{bot}",
                     "--mode", "full"
                 ]
