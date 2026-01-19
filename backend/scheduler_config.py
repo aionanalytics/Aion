@@ -102,6 +102,28 @@ SCHEDULE = [
         }
         for w in ["1w", "2w", "4w"]
     ],
+    *[
+        {
+            "name": f"bot_loop_{w}_1430",
+            "time": "14:30",
+            "module": f"backend.bots.runner_{w}",
+            "args": ["--mode", "loop"],
+            "cwd": PROJECT_ROOT,
+            "description": f"{w} bot afternoon loop.",
+        }
+        for w in ["1w", "2w", "4w"]
+    ],
+    *[
+        {
+            "name": f"eod_{w}_close",
+            "time": "16:15",
+            "module": f"backend.bots.runner_{w}",
+            "args": ["--mode", "full"],
+            "cwd": PROJECT_ROOT,
+            "description": f"Market close rebalance for {w} bot.",
+        }
+        for w in ["1w", "2w", "4w"]
+    ],
     {
         "name": "dt_daytrader_start",
         "time": "07:28",
