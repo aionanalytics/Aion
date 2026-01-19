@@ -106,7 +106,9 @@ export type BotsPageBundle = {
       signals?: IntradaySignal[];
       error?: string;
     };
-    // Legacy tape field (deprecated, use fills_recent/signals_latest instead)
+    // Legacy tape field - DEPRECATED as of v1.0.0 (January 2026)
+    // Use fills_recent and signals_latest instead
+    // This field will be removed in v2.0.0
     tape?: {
       updated_at?: string | null;
       fills?: IntradayFill[];

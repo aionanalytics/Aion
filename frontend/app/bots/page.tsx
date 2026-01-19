@@ -6,6 +6,7 @@ import Link from "next/link";
 
 import { Activity, Clock, DollarSign, Shield, SlidersHorizontal, RefreshCw, Settings } from "lucide-react";
 
+import { cn } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -707,7 +708,7 @@ export default function BotsPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-    const [live, setLive] = useState(true);
+  const [live, setLive] = useState(true);
   const [pollMs, setPollMs] = useState(5000);
 
   const inFlightRef = useRef(false);
@@ -877,7 +878,7 @@ export default function BotsPage() {
             </div>
 
             <Button variant="outline" onClick={refresh} disabled={loading} className="gap-2">
-              <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+              <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
               Refresh
             </Button>
           </div>
