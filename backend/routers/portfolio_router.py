@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException
 from backend.core.config import PATHS
 from backend.core.data_pipeline import safe_float
 
-router = APIRouter(prefix="/portfolio", tags=["portfolio"])
+router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 
 # ---------------------------------------------------------------------
 # Paths

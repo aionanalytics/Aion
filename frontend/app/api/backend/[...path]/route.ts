@@ -90,13 +90,17 @@ async function handleRequest(
     let targetPath: string;
     if (pathParts.length > 0) {
       const firstSegment = pathParts[0];
+      const fullPath = `/${pathParts.join("/")}`;
       
       // Dashboard and admin routes don't need /api prefix
       if (firstSegment === "dashboard" || firstSegment === "admin") {
-        targetPath = `/${pathParts.join("/")}`;
+        targetPath = fullPath;
+      } else if (firstSegment === "api") {
+        // Path already starts with /api, don't prepend again
+        targetPath = fullPath;
       } else {
         // All other routes get /api prefix
-        targetPath = `/api/${pathParts.join("/")}`;
+        targetPath = `/api${fullPath}`;
       }
     } else {
       targetPath = "/api";

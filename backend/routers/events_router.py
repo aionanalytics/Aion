@@ -23,7 +23,7 @@ try:
 except ImportError:
     from backend.config import TIMEZONE  # type: ignore
 
-router = APIRouter(prefix="/events", tags=["events"])
+router = APIRouter(prefix="/api/events", tags=["events"])
 
 
 async def _safe_call(func, *args, **kwargs) -> Dict[str, Any]:

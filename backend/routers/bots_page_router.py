@@ -258,6 +258,10 @@ async def bots_page_bundle() -> Dict[str, Any]:
     Note: No backend cache - UI uses SSE and real-time fetches for live updates.
     Cache decorators can block the event loop and cause 502 errors in async contexts.
     """
+    import time
+    start_time = time.time()
+    print(f"[bots_page_bundle] Starting bundle fetch at {datetime.now(TIMEZONE).isoformat()}", flush=True)
+    
     out: Dict[str, Any] = {
         "as_of": datetime.now(TIMEZONE).isoformat(),
         "swing": {},
@@ -268,60 +272,118 @@ async def bots_page_bundle() -> Dict[str, Any]:
     try:
         eod = _import_module("backend.routers.eod_bots_router")
         try:
+            subcall_start = time.time()
+            print("[bots_page_bundle] Fetching swing/eod_status...", flush=True)
             out["swing"]["status"] = await _call(eod, "eod_status")
+            elapsed = (time.time() - subcall_start) * 1000
+            print(f"[bots_page_bundle] ✓ swing/eod_status completed in {elapsed:.1f}ms", flush=True)
         except Exception as e:
+            elapsed = (time.time() - subcall_start) * 1000
+            print(f"[bots_page_bundle] ✗ swing/eod_status failed after {elapsed:.1f}ms: {e}", flush=True)
             out["swing"]["status"] = _err(e)
 
         try:
+            subcall_start = time.time()
+            print("[bots_page_bundle] Fetching swing/configs...", flush=True)
             out["swing"]["configs"] = await _call(eod, "list_eod_bot_configs")
+            elapsed = (time.time() - subcall_start) * 1000
+            print(f"[bots_page_bundle] ✓ swing/configs completed in {elapsed:.1f}ms", flush=True)
         except Exception as e:
+            elapsed = (time.time() - subcall_start) * 1000
+            print(f"[bots_page_bundle] ✗ swing/configs failed after {elapsed:.1f}ms: {e}", flush=True)
             out["swing"]["configs"] = _err(e)
 
         try:
+            subcall_start = time.time()
+            print("[bots_page_bundle] Fetching swing/log_days...", flush=True)
             out["swing"]["log_days"] = await _call(eod, "eod_log_days")
+            elapsed = (time.time() - subcall_start) * 1000
+            print(f"[bots_page_bundle] ✓ swing/log_days completed in {elapsed:.1f}ms", flush=True)
         except Exception as e:
+            elapsed = (time.time() - subcall_start) * 1000
+            print(f"[bots_page_bundle] ✗ swing/log_days failed after {elapsed:.1f}ms: {e}", flush=True)
             out["swing"]["log_days"] = _err(e)
     except Exception as e:
+        print(f"[bots_page_bundle] ✗ swing module import/init failed: {e}", flush=True)
         out["swing"] = _err(e)
 
     # --- Intraday ---
     try:
         dt = _import_module("backend.routers.intraday_logs_router")
         try:
+            subcall_start = time.time()
+            print("[bots_page_bundle] Fetching intraday/status...", flush=True)
             out["intraday"]["status"] = await _call(dt, "intraday_status")
+            elapsed = (time.time() - subcall_start) * 1000
+            print(f"[bots_page_bundle] ✓ intraday/status completed in {elapsed:.1f}ms", flush=True)
         except Exception as e:
+            elapsed = (time.time() - subcall_start) * 1000
+            print(f"[bots_page_bundle] ✗ intraday/status failed after {elapsed:.1f}ms: {e}", flush=True)
             out["intraday"]["status"] = _err(e)
 
         try:
+            subcall_start = time.time()
+            print("[bots_page_bundle] Fetching intraday/configs...", flush=True)
             out["intraday"]["configs"] = await _call(dt, "intraday_configs")
+            elapsed = (time.time() - subcall_start) * 1000
+            print(f"[bots_page_bundle] ✓ intraday/configs completed in {elapsed:.1f}ms", flush=True)
         except Exception as e:
+            elapsed = (time.time() - subcall_start) * 1000
+            print(f"[bots_page_bundle] ✗ intraday/configs failed after {elapsed:.1f}ms: {e}", flush=True)
             out["intraday"]["configs"] = _err(e)
 
         try:
+            subcall_start = time.time()
+            print("[bots_page_bundle] Fetching intraday/log_days...", flush=True)
             out["intraday"]["log_days"] = await _call(dt, "list_log_days")
+            elapsed = (time.time() - subcall_start) * 1000
+            print(f"[bots_page_bundle] ✓ intraday/log_days completed in {elapsed:.1f}ms", flush=True)
         except Exception as e:
+            elapsed = (time.time() - subcall_start) * 1000
+            print(f"[bots_page_bundle] ✗ intraday/log_days failed after {elapsed:.1f}ms: {e}", flush=True)
             out["intraday"]["log_days"] = _err(e)
 
         # Optional PnL summary (from sim_summary.json)
         try:
+            subcall_start = time.time()
+            print("[bots_page_bundle] Fetching intraday/pnl_last_day...", flush=True)
             out["intraday"]["pnl_last_day"] = await _call(dt, "get_last_day_pnl_summary")
+            elapsed = (time.time() - subcall_start) * 1000
+            print(f"[bots_page_bundle] ✓ intraday/pnl_last_day completed in {elapsed:.1f}ms", flush=True)
         except Exception as e:
+            elapsed = (time.time() - subcall_start) * 1000
+            print(f"[bots_page_bundle] ✗ intraday/pnl_last_day failed after {elapsed:.1f}ms: {e}", flush=True)
             out["intraday"]["pnl_last_day"] = _err(e)
 
     except Exception as e:
+        print(f"[bots_page_bundle] ✗ intraday module import/init failed: {e}", flush=True)
         out["intraday"] = _err(e)
 
-    # --- Best-effort “live-ish” artifacts ---
+    # --- Best-effort "live-ish" artifacts ---
     try:
+        subcall_start = time.time()
+        print("[bots_page_bundle] Fetching intraday/signals_latest...", flush=True)
         out["intraday"]["signals_latest"] = _load_intraday_signals_best_effort(limit=50)
+        elapsed = (time.time() - subcall_start) * 1000
+        print(f"[bots_page_bundle] ✓ intraday/signals_latest completed in {elapsed:.1f}ms", flush=True)
     except Exception as e:
+        elapsed = (time.time() - subcall_start) * 1000
+        print(f"[bots_page_bundle] ✗ intraday/signals_latest failed after {elapsed:.1f}ms: {e}", flush=True)
         out["intraday"]["signals_latest"] = _err(e)
 
     try:
+        subcall_start = time.time()
+        print("[bots_page_bundle] Fetching intraday/fills_recent...", flush=True)
         out["intraday"]["fills_recent"] = _load_intraday_fills_best_effort(limit=50)
+        elapsed = (time.time() - subcall_start) * 1000
+        print(f"[bots_page_bundle] ✓ intraday/fills_recent completed in {elapsed:.1f}ms", flush=True)
     except Exception as e:
+        elapsed = (time.time() - subcall_start) * 1000
+        print(f"[bots_page_bundle] ✗ intraday/fills_recent failed after {elapsed:.1f}ms: {e}", flush=True)
         out["intraday"]["fills_recent"] = _err(e)
 
+    total_elapsed = (time.time() - start_time) * 1000
+    print(f"[bots_page_bundle] ✅ Bundle complete in {total_elapsed:.1f}ms", flush=True)
     return out
 
 
