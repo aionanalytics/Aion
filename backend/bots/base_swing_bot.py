@@ -122,8 +122,35 @@ try:
 except Exception:
     from backend.config import PATHS  # type: ignore
 
+# ---------------------------------------------------------------------
+# Module-level logging functions
+# ---------------------------------------------------------------------
+
+def _now_iso() -> str:
+    """Current time in ISO8601 format."""
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+def log(msg: str) -> None:
+    """Log swing bot activity to stdout and file."""
+    ts = _now_iso()
+    line = f"[swing_bot] {ts} {msg}"
+    print(line, flush=True)
+    
+    # Also write to log file
+    try:
+        log_file = Path(PATHS.get("logs", Path(".") / "logs")) / "bots" / "swing_bot.log"
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        with log_file.open("a", encoding="utf-8", errors="replace") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+# ---------------------------------------------------------------------
+# Data pipeline fallback
+# ---------------------------------------------------------------------
+
 try:
-    from backend.core.data_pipeline import _read_rolling, log  # type: ignore
+    from backend.core.data_pipeline import _read_rolling  # type: ignore
 except Exception:  # Fallback (e.g. older envs)
     from pathlib import Path as _Path
     import json as _json
@@ -140,9 +167,6 @@ except Exception:  # Fallback (e.g. older envs)
                 return _json.load(f)
         except Exception:
             return {}
-
-    def log(msg: str) -> None:
-        print(msg, flush=True)
 
 # Swing Phase 0: truth/instrumentation (best-effort)
 try:
@@ -206,10 +230,6 @@ def _bot_is_enabled(bot_key: str) -> bool:
 # ---------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _days_held(pos: "Position", now: datetime | None = None) -> int:
@@ -711,6 +731,12 @@ class SwingBot:
         into a composite score for each symbol.
         Long-only for now (BUY-only).
         """
+        # Extract global regime label from rolling data
+        g = rolling.get("_GLOBAL") if isinstance(rolling, dict) else None
+        g = g if isinstance(g, dict) else {}
+        reg = g.get("regime") if isinstance(g.get("regime"), dict) else {}
+        regime = str((reg or {}).get("label") or "unknown").strip().lower()
+        
         # insight rank: lower index = stronger rank
         insight_rank: Dict[str, int] = {}
         for idx, row in enumerate(insights):
@@ -777,9 +803,9 @@ class SwingBot:
                 continue
             # Phase 7: calibrated probability-of-hit + EV (expected value) gating.
             p_hit = float(pol_conf)
-            if self.cfg.use_phit and callable(get_phit_swing):
+            if self.cfg.use_phit and callable(_get_phit):
                 try:
-                    p_hit = float(get_phit_swing(
+                    p_hit = float(_get_phit(
                         base_conf=float(pol_conf),
                         expected_return=float(exp_ret),
                         regime_label=str(regime),
