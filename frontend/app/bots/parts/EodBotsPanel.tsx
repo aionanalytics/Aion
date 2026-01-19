@@ -101,8 +101,8 @@ export default function EodBotsPanel() {
       setError(null);
       setRefreshing(true);
 
-      // Fetch from unified bots page endpoint (via Next.js proxy)
-      const res = await fetch("/api/backend/bots/page", { cache: "no-store" });
+      // Use proxy route instead of direct backend call
+      const res = await fetch("/api/backend/eod/status");
 
       if (!res.ok) {
         throw new Error(`failed (status ${res.status})`);
