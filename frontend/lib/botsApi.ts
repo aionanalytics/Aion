@@ -94,6 +94,7 @@ async function apiPostJson<T>(url: string, body: any): Promise<T> {
  * 1. Races all URLs in parallel with configurable timeout
  * 2. Returns the first successful response
  * 3. Fails fast if no URL responds within timeout
+ * 4. Properly cleans up all pending requests using AbortController
  * 
  * @param urls - Array of URLs to try
  * @param timeoutMs - Timeout per request in milliseconds (default: 3000)
@@ -104,27 +105,40 @@ async function tryGetFirst<T>(
 ): Promise<{ url: string; data: T } | null> {
   if (urls.length === 0) return null;
 
-  // Create a promise for each URL with timeout
-  const promises = urls.map(async (url) => {
-    let timeoutId: NodeJS.Timeout | null = null;
-    
-    // Create a timeout promise that rejects after timeoutMs
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timeoutId = setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms`)), timeoutMs);
-    });
+  // Keep track of all abort controllers for cleanup
+  const controllers: AbortController[] = [];
 
-    // Race the fetch against the timeout
+  // Create a promise for each URL with timeout and abort capability
+  const promises = urls.map(async (url) => {
+    const controller = new AbortController();
+    controllers.push(controller);
+    
+    // Set up timeout that will abort the request
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, timeoutMs);
+
     try {
-      const data = await Promise.race([
-        apiGet<T>(url),
-        timeoutPromise
-      ]);
-      // Clear timeout if request completes successfully
-      if (timeoutId) clearTimeout(timeoutId);
+      // Make request with abort signal
+      const response = await fetch(url, { 
+        method: "GET", 
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      
+      // Clear timeout on success
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        throw new Error(`GET ${url} failed: ${response.status} ${response.statusText}`);
+      }
+      
+      const data = await response.json() as T;
       return { url, data };
     } catch (error) {
-      // Clear timeout on error as well
-      if (timeoutId) clearTimeout(timeoutId);
+      // Clear timeout on error
+      clearTimeout(timeoutId);
+      
       // Re-throw to let Promise.any handle it
       throw error;
     }
@@ -133,9 +147,15 @@ async function tryGetFirst<T>(
   // Promise.any returns the first fulfilled promise
   // If all promises reject, it throws an AggregateError
   try {
-    return await Promise.any(promises);
+    const result = await Promise.any(promises);
+    
+    // Abort all other pending requests
+    controllers.forEach(c => c.abort());
+    
+    return result;
   } catch (error) {
-    // All URLs failed - return null
+    // All URLs failed - abort any still-pending requests
+    controllers.forEach(c => c.abort());
     return null;
   }
 }
