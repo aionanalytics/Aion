@@ -113,7 +113,6 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
 
 
 def _env(name: str, default: str = "") -> str:
-    import os
     return (os.getenv(name, default) or "").strip()
 
 
