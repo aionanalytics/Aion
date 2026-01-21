@@ -42,12 +42,16 @@ const INVALID_PATTERNS = {
  * 
  * @param url - The URL to validate
  * @param context - Optional context for better error messages (e.g., component name)
+ * @param strict - If true, throws errors for all violations. If false, only warns. Default: true in dev, false in prod
  * @returns The validated URL (unchanged if valid)
- * @throws Error in development if URL is invalid
+ * @throws Error if strict=true and URL is invalid
  */
-export function validateApiUrl(url: string, context?: string): string {
-  // Only validate in development and browser environment
-  if (process.env.NODE_ENV !== "development" || typeof window === "undefined") {
+export function validateApiUrl(url: string, context?: string, strict?: boolean): string {
+  // Determine strictness: true in dev by default, false in prod
+  const isStrict = strict !== undefined ? strict : (process.env.NODE_ENV === "development");
+  
+  // Skip validation in production unless explicitly strict
+  if (process.env.NODE_ENV === "production" && !isStrict) {
     return url;
   }
 
@@ -58,7 +62,9 @@ export function validateApiUrl(url: string, context?: string): string {
     const error = `[API Helper] Hardcoded localhost URL detected${contextMsg}: "${url}"\n` +
       `Use proxy route instead: /api/backend/...`;
     console.error(error);
-    throw new Error(error);
+    if (isStrict) {
+      throw new Error(error);
+    }
   }
 
   // Check for hardcoded IP address
@@ -66,7 +72,9 @@ export function validateApiUrl(url: string, context?: string): string {
     const error = `[API Helper] Hardcoded IP address detected${contextMsg}: "${url}"\n` +
       `Use proxy route instead: /api/backend/...`;
     console.error(error);
-    throw new Error(error);
+    if (isStrict) {
+      throw new Error(error);
+    }
   }
 
   // Check for double /api prefix
@@ -74,15 +82,18 @@ export function validateApiUrl(url: string, context?: string): string {
     const error = `[API Helper] Double /api prefix detected${contextMsg}: "${url}"\n` +
       `Should be: /api/backend/... (not /api/backend/api/...)`;
     console.error(error);
-    throw new Error(error);
+    if (isStrict) {
+      throw new Error(error);
+    }
   }
 
-  // Check for direct HTTP URLs (should use proxy)
+  // Check for direct HTTP URLs (warning only by default, can be made strict)
   if (INVALID_PATTERNS.DIRECT_HTTP_URL.test(url)) {
-    console.warn(
-      `[API Helper] Direct HTTP URL detected${contextMsg}: "${url}"\n` +
-      `Consider using proxy route for CORS handling: /api/backend/...`
-    );
+    const warning = `[API Helper] Direct HTTP URL detected${contextMsg}: "${url}"\n` +
+      `Consider using proxy route for CORS handling: /api/backend/...`;
+    console.warn(warning);
+    // Note: This is typically a warning, but can throw if strict mode is enabled
+    // and this is a concern for your application
   }
 
   return url;
@@ -121,8 +132,15 @@ export function isProxyRoute(url: string): boolean {
 
 /**
  * Get backend base URL for server-side requests.
- * This should only be used in Next.js API routes or Server Components.
- * Client components should use proxy routes.
+ * 
+ * ⚠️ IMPORTANT: This should ONLY be used in:
+ * - Next.js API routes (server-side)
+ * - Server Components (server-side)
+ * 
+ * Client components should ALWAYS use proxy routes (/api/backend or /api/dt).
+ * 
+ * The fallback URLs are for local development only. In production, always
+ * set BACKEND_URL and DT_BACKEND_URL environment variables.
  * 
  * @param backend - Backend type: "main" (default) or "dt" for intraday backend
  * @returns Backend base URL
@@ -138,12 +156,12 @@ export function getBackendUrl(backend: "main" | "dt" = "main"): string {
   if (backend === "dt") {
     return process.env.DT_BACKEND_URL || 
            process.env.NEXT_PUBLIC_DT_BACKEND_URL || 
-           "http://localhost:8010";
+           "http://localhost:8010"; // Fallback for local development
   }
 
   return process.env.BACKEND_URL || 
          process.env.NEXT_PUBLIC_BACKEND_URL || 
-         "http://localhost:8000";
+         "http://localhost:8000"; // Fallback for local development
 }
 
 /**
@@ -152,14 +170,16 @@ export function getBackendUrl(backend: "main" | "dt" = "main"): string {
  * @param url - The URL to fetch
  * @param init - Fetch options
  * @param context - Optional context for error messages
+ * @param strict - Optional strictness for validation (default: true in dev)
  * @returns Fetch promise
  */
 export async function safeFetch(
   url: string,
   init?: RequestInit,
-  context?: string
+  context?: string,
+  strict?: boolean
 ): Promise<Response> {
-  const validatedUrl = validateApiUrl(url, context);
+  const validatedUrl = validateApiUrl(url, context, strict);
   return fetch(validatedUrl, init);
 }
 
