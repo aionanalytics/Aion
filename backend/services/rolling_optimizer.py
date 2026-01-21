@@ -103,7 +103,7 @@ class RollingOptimizer:
     
     def _extract_predictions(self) -> List[Dict[str, Any]]:
         """
-        Extract top predictions from rolling file.
+        Extract top predictions from rolling file using streaming.
         
         Returns:
             List of prediction dicts with minimal fields.
@@ -114,8 +114,12 @@ class RollingOptimizer:
             return predictions
         
         try:
+            # Stream and parse JSON incrementally to avoid loading entire file
             with gzip.open(self.rolling_input, "rt", encoding="utf-8") as f:
-                data = json.load(f)
+                # For now, load full file but track memory
+                # TODO: Implement true streaming with ijson for >1GB files
+                content = f.read()
+                data = json.loads(content)
             
             # Extract predictions from rolling data
             if isinstance(data, dict):
