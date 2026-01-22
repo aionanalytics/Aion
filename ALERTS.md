@@ -52,9 +52,28 @@ from backend.monitoring.alerting import (
 )
 
 # Examples
-alert_error("Database Connection Failed", "Cannot connect to Redis")
+
+# ✅ CORRECT: DT trade → #day_trading
 alert_dt("Trade Executed", f"BUY {symbol} @ ${price}")
+
+# ✅ CORRECT: DT position exit → #day_trading
+alert_dt("Position Closed: AAPL", "Exit reason: stop_hit", 
+         context={"PnL": "-1.2%", "Hold": "15 min"})
+
+# ✅ CORRECT: DT cycle completion → #day_trading
+alert_dt("DT Cycle Complete", "Lane: FAST | Orders: 3")
+
+# ✅ CORRECT: End-of-day PnL summary → #daily-pnl
 alert_pnl(f"Daily PnL: ${pnl:+.2f}", f"MTD: ${mtd:+.2f}")
+
+# ❌ WRONG: DT activity should NOT go to #daily-pnl
+# alert_pnl("Trade Executed", f"BUY {symbol}")  # DON'T DO THIS!
+
+# ✅ CORRECT: Nightly job status → #nightly-logs-summary  
+alert_nightly("Nightly Job Complete", "All phases succeeded")
+
+# ✅ CORRECT: System error → #errors-tracebacks
+alert_error("Database Connection Failed", "Cannot connect to Redis")
 ```
 
 ## Alert Context
@@ -198,13 +217,52 @@ alert_critical("Stop", "Trading halted", channel="trading")
 alert_critical("Stop", "Trading halted")  # channel defaults to "trading"
 ```
 
+## Channel Routing Rules
+
+⚠️ **IMPORTANT**: Use the correct alert function for each context:
+
+### Day Trading (DT) Alerts → `alert_dt()` → #day_trading
+- **Position exits** (stop hit, take profit, time stop, scratch)
+- **Trade entries** (BUY/SELL executions)
+- **Cycle completions** (fast/slow lane status)
+- **DT bot activity** (ORB, momentum, etc.)
+
+❌ **DO NOT** use `alert_pnl()` for DT trades or positions!
+
+### PnL Reports → `alert_pnl()` → #daily-pnl
+- **End-of-day PnL summaries** (daily totals)
+- **Weekly/monthly PnL** aggregates
+- **Equity curve updates**
+- **Performance metrics** (win rate, Sharpe, etc.)
+
+### Swing Trading → `alert_swing()` → #swing_trading
+- **Swing position entries/exits**
+- **EOD bot activity**
+- **Multi-day holds**
+
+### Nightly Jobs → `alert_nightly()` → #nightly-logs-summary
+- **Job completions** (success/failure)
+- **Phase summaries**
+- **Data pipeline status**
+
+### Errors → `alert_error()` → #errors-tracebacks
+- **Unhandled exceptions**
+- **Critical system failures**
+- **Circuit breaker trips**
+
+### Reports → `alert_report()` → #reports
+- **Model performance metrics**
+- **Regime change detection**
+- **Analysis insights**
+
 ## Best Practices
 
 1. **Use appropriate channels**: Route alerts to their intended channel for better organization
-2. **Add context**: Include relevant details in the `context` parameter
-3. **Use @channel sparingly**: Only for truly critical alerts that require immediate attention
-4. **Test before deploying**: Use the test endpoint to verify all channels work
-5. **Monitor alert volume**: Too many alerts = alert fatigue
+2. **DT ≠ PnL**: Day trading alerts go to #day_trading, NOT #daily-pnl
+3. **Add context**: Include relevant details in the `context` parameter
+4. **Use @channel sparingly**: Only for truly critical alerts that require immediate attention
+5. **Test before deploying**: Use the test endpoint to verify all channels work
+6. **Monitor alert volume**: Too many alerts = alert fatigue
 
 ## Security
 
