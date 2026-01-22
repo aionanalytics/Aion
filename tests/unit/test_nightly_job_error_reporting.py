@@ -169,7 +169,7 @@ class TestNightlySkipGuardAlert:
     
     def test_skip_alert_sent(self, mock_alert_nightly):
         """Test that skip alert is sent when nightly is skipped."""
-        MIN_HOURS_BETWEEN_RUNS = 12
+        MIN_HOURS_BETWEEN_RUNS = 8  # Default value from nightly_job.py
         
         # Simulate skip notification
         mock_alert_nightly(
@@ -184,7 +184,7 @@ class TestNightlySkipGuardAlert:
         # Verify alert details
         call_args = mock_alert_nightly.call_args
         assert "Nightly Job Skipped" in call_args[0][0]
-        assert "12h" in call_args[0][1]
+        assert "8h" in call_args[0][1]
         assert call_args[1]["context"]["Reason"] == "Recent run guard"
 
 
