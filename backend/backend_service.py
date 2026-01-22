@@ -52,13 +52,24 @@ from backend.routers.settings_consolidated_router import router as settings_cons
 
 # KEEP: Essential routers still needed
 from backend.routers.health_router import router as health_router
-from backend.routers.testing_router import router as testing_router
 from backend.routers.events_router import router as events_router  # SSE endpoints
 from backend.routers.unified_cache_router import router as unified_cache_router  # Existing cache
+
+# OPTIONAL: Testing router (may have import issues)
+testing_router = None  # Will be set if import succeeds
+try:
+    from backend.routers.testing_router import router as testing_router
+except ImportError as e:
+    print(f"[Backend] ⚠️ Testing router not available: {e}")
 
 # KEEP: Legacy admin routers (for backward compat)
 from backend.admin.routes import router as admin_router
 from backend.admin.admin_tools_router import router as admin_tools_router
+
+# KEEP: Legacy routers for backward compatibility (frontend still uses these)
+# These will be gradually phased out as frontend migrates to consolidated endpoints
+from backend.routers.bots_page_router import router as bots_page_router
+from backend.routers.dashboard_router import router as dashboard_router
 
 # OLD ROUTERS (commented out - replaced by consolidated routers)
 # from backend.routers.system_status_router import router as system_router
@@ -141,14 +152,21 @@ ROUTERS = [
     
     # KEEP: Essential routers
     health_router,              # Health checks
-    testing_router,             # Testing endpoints
+    testing_router,             # Testing endpoints (optional, may be None)
     events_router,              # SSE endpoints
     unified_cache_router,       # Existing unified cache
     
     # KEEP: Legacy admin (backward compat)
     admin_router,
     admin_tools_router,
+    
+    # KEEP: Legacy data routers (backward compat - will be phased out)
+    bots_page_router,           # /api/bots/page
+    dashboard_router,           # /dashboard/metrics, /dashboard/top/{horizon}
 ]
+
+# Filter out None routers (e.g., testing_router if import failed)
+ROUTERS = [r for r in ROUTERS if r is not None]
 
 # Mount all routers with logging
 for r in ROUTERS:
