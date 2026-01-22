@@ -84,13 +84,33 @@ export default function InsightsPage() {
         setLoading(true);
         setError(null);
 
-        const res = await fetch(
-          `${API_BASE}/api/backend/api/insights/predictions/latest`,
-          { cache: "no-store" }
-        );
+        // Try consolidated endpoint first, then fallback to legacy endpoints
+        // Fix: Remove double /api/api/ prefix
+        const urls = [
+          `${API_BASE}/api/backend/page/predict`,             // NEW consolidated endpoint through proxy
+          `${API_BASE}/api/page/predict`,                      // NEW consolidated endpoint direct
+          `${API_BASE}/api/backend/insights/predictions/latest`, // OLD endpoint through proxy (fallback)
+          `${API_BASE}/api/insights/predictions/latest`,         // OLD endpoint direct (fallback)
+        ];
 
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const json = (await res.json()) as PredictionFeed;
+        let json: PredictionFeed | null = null;
+        
+        // Try each URL in sequence
+        for (const url of urls) {
+          try {
+            const res = await fetch(url, { cache: "no-store" });
+            if (res.ok) {
+              json = (await res.json()) as PredictionFeed;
+              break;
+            }
+          } catch {
+            // Try next URL
+          }
+        }
+
+        if (!json) {
+          throw new Error("Failed to load predictions from any endpoint");
+        }
 
         if (!mounted) return;
         setFeed(json);
