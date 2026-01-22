@@ -39,57 +39,6 @@ function clampPct(x: number) {
   return Math.min(100, Math.max(0, x));
 }
 
-/**
- * Try multiple URLs in parallel with timeout, return first success
- * Uses the same pattern as bots page for endpoint migration
- */
-async function tryGetFirst<T>(
-  urls: string[],
-  timeoutMs: number = 3000
-): Promise<{ url: string; data: T } | null> {
-  if (urls.length === 0) return null;
-
-  const controllers: AbortController[] = [];
-
-  const promises = urls.map(async (url) => {
-    const controller = new AbortController();
-    controllers.push(controller);
-    
-    const timeoutId = setTimeout(() => {
-      controller.abort();
-    }, timeoutMs);
-
-    try {
-      const response = await fetch(url, { 
-        method: "GET", 
-        cache: "no-store",
-        signal: controller.signal,
-      });
-      
-      clearTimeout(timeoutId);
-      
-      if (!response.ok) {
-        throw new Error(`GET ${url} failed: ${response.status} ${response.statusText}`);
-      }
-      
-      const data = await response.json() as T;
-      return { url, data };
-    } catch (error) {
-      clearTimeout(timeoutId);
-      throw error;
-    }
-  });
-
-  try {
-    const result = await Promise.any(promises);
-    controllers.forEach(c => c.abort());
-    return result;
-  } catch (error) {
-    controllers.forEach(c => c.abort());
-    return null;
-  }
-}
-
 /* -------------------------------------------------- */
 /* Component                                          */
 /* -------------------------------------------------- */
@@ -379,7 +328,6 @@ export default function AdminPage() {
     ];
     
     let res: Response | null = null;
-    let usedUrl = "";
     
     for (const url of urls) {
       try {
@@ -390,18 +338,18 @@ export default function AdminPage() {
         });
         
         if (res.ok) {
-          usedUrl = url;
           console.log(`[Admin] Restart endpoint used: ${url}`);
           break;
         }
       } catch (e) {
-        // Try next URL
+        // Log failed attempt and try next URL
+        console.warn(`[Admin] Restart endpoint failed: ${url}`, e);
         continue;
       }
     }
     
     if (!res || !res.ok) {
-      setError(`Restart failed ❌ All endpoints unreachable`);
+      setError(`Restart failed ❌ All endpoints unreachable: ${urls.join(', ')}`);
       return;
     }
 
