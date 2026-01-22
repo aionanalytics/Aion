@@ -250,6 +250,130 @@ class TestAlertingSystem:
             assert mock_post.called
 
 
+class TestDTAlertRouting:
+    """Test suite specifically for DT (Day Trading) alert routing verification.
+    
+    This ensures DT-related alerts go to #day_trading channel, NOT #daily-pnl.
+    """
+    
+    def test_dt_position_exit_routes_to_day_trading(self, mock_env, mock_requests):
+        """Verify position exits from DT use alert_dt() → #day_trading."""
+        from backend.monitoring.alerting import alert_dt
+        
+        # Simulate position exit alert
+        alert_dt(
+            "Position Closed: AAPL",
+            "Exit reason: stop_hit",
+            level="info",
+            context={
+                "Bot": "ORB",
+                "Entry Price": "$180.50",
+                "Exit Price": "$178.25",
+                "PnL": "-1.25% ($-22.50)",
+            }
+        )
+        
+        # Verify routed to DT channel
+        call_args = mock_requests.call_args
+        assert "test_dt" in call_args[0][0], "Position exit should go to #day_trading, NOT #daily-pnl"
+        assert "test_pnl" not in call_args[0][0], "Position exit should NOT go to #daily-pnl"
+    
+    def test_dt_cycle_completion_routes_to_day_trading(self, mock_env, mock_requests):
+        """Verify DT cycle completion alerts use alert_dt() → #day_trading."""
+        from backend.monitoring.alerting import alert_dt
+        
+        # Simulate cycle completion alert
+        alert_dt(
+            "DT Cycle Complete: abc123",
+            "Lane: FAST | Seq: 42",
+            level="info",
+            context={
+                "Orders Sent": "3",
+                "Exits Sent": "1",
+                "Considered": "12",
+                "Blocked": "2",
+            }
+        )
+        
+        # Verify routed to DT channel
+        call_args = mock_requests.call_args
+        assert "test_dt" in call_args[0][0], "Cycle completion should go to #day_trading, NOT #daily-pnl"
+        assert "test_pnl" not in call_args[0][0], "Cycle completion should NOT go to #daily-pnl"
+    
+    def test_dt_trade_entry_routes_to_day_trading(self, mock_env, mock_requests):
+        """Verify DT trade entries use alert_dt() → #day_trading."""
+        from backend.monitoring.alerting import alert_dt
+        
+        # Simulate trade entry alert
+        alert_dt(
+            "Trade Executed: BUY TSLA",
+            "Entry: $245.50 | Stop: $240.00 | Target: $252.00",
+            level="info",
+            context={
+                "Bot": "ORB",
+                "Confidence": "0.75",
+                "Risk:Reward": "1:2.4",
+            }
+        )
+        
+        # Verify routed to DT channel
+        call_args = mock_requests.call_args
+        assert "test_dt" in call_args[0][0], "Trade entry should go to #day_trading, NOT #daily-pnl"
+        assert "test_pnl" not in call_args[0][0], "Trade entry should NOT go to #daily-pnl"
+    
+    def test_pnl_reports_route_to_daily_pnl(self, mock_env, mock_requests):
+        """Verify PnL summary reports use alert_pnl() → #daily-pnl (NOT #day_trading)."""
+        from backend.monitoring.alerting import alert_pnl
+        
+        # Simulate end-of-day PnL report
+        alert_pnl(
+            "Daily PnL Summary",
+            "Trading day complete",
+            context={
+                "Daily PnL": "$+250.50",
+                "Win Rate": "65%",
+                "Total Trades": "12",
+                "MTD PnL": "$+1,250.00",
+            }
+        )
+        
+        # Verify routed to PnL channel
+        call_args = mock_requests.call_args
+        assert "test_pnl" in call_args[0][0], "PnL reports should go to #daily-pnl"
+        assert "test_dt" not in call_args[0][0], "PnL reports should NOT go to #day_trading"
+    
+    def test_all_dt_alert_functions_route_correctly(self, mock_env, mock_requests):
+        """Comprehensive test that all alert functions route to correct channels."""
+        from backend.monitoring.alerting import (
+            alert_dt,
+            alert_swing,
+            alert_nightly,
+            alert_pnl,
+            alert_error,
+            alert_report,
+        )
+        
+        # Test each alert function
+        test_cases = [
+            (alert_dt, "DT Test", "test_dt", "#day_trading"),
+            (alert_swing, "Swing Test", "test_swing", "#swing_trading"),
+            (alert_nightly, "Nightly Test", "test_nightly", "#nightly-logs-summary"),
+            (alert_pnl, "PnL Test", "test_pnl", "#daily-pnl"),
+            (alert_error, "Error Test", "test_errors", "#errors-tracebacks"),
+            (alert_report, "Report Test", "test_reports", "#reports"),
+        ]
+        
+        for alert_fn, title, expected_channel, expected_slack_channel in test_cases:
+            mock_requests.reset_mock()
+            
+            alert_fn(title, "Test message")
+            
+            assert mock_requests.called, f"{alert_fn.__name__} did not send alert"
+            call_args = mock_requests.call_args
+            assert expected_channel in call_args[0][0], \
+                f"{alert_fn.__name__} should route to {expected_slack_channel} (webhook contains '{expected_channel}')"
+
+
 class TestErrorHandler:
     """Test suite for error handler."""
     
