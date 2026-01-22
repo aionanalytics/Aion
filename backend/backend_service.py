@@ -56,11 +56,11 @@ from backend.routers.events_router import router as events_router  # SSE endpoin
 from backend.routers.unified_cache_router import router as unified_cache_router  # Existing cache
 
 # OPTIONAL: Testing router (may have import issues)
+testing_router = None  # Will be set if import succeeds
 try:
     from backend.routers.testing_router import router as testing_router
 except ImportError as e:
     print(f"[Backend] ⚠️ Testing router not available: {e}")
-    testing_router = None
 
 # KEEP: Legacy admin routers (for backward compat)
 from backend.admin.routes import router as admin_router

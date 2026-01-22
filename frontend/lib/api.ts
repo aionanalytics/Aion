@@ -131,7 +131,7 @@ export async function getIntradaySnapshot(limit: number = 120, useCache: boolean
 
 /**
  * Get bots page data (unified status for all bot families).
- * NEW CONSOLIDATED ENDPOINT: /api/page/bots
+ * UPDATED to use NEW CONSOLIDATED ENDPOINT: /api/page/bots (was /api/bots/page)
  */
 export async function getBotsPage(useCache: boolean = false) {
   const path = "/api/page/bots";
