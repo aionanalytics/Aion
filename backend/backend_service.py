@@ -1,5 +1,5 @@
 # Admin consolidated router import
-from .admin_consolidated_router import admin_consolidated_router  
+from backend.routers.admin_consolidated_router import router as admin_consolidated_router 
 
 # Commented out routers
 # from .page_data_router import page_data_router  
