@@ -683,7 +683,7 @@ def execute_from_policy(
                     # Look at raw policy_dt for underlying signal strength
                     policy = node.get("policy_dt", {})
                     if isinstance(policy, dict):
-                        raw_intent = str(policy.get("intent") or "").upper()
+                        raw_intent = str(policy.get("action") or "").upper()
                         raw_conf = _safe_float(policy.get("confidence"), 0.0)
                         
                         # If BUY signal still active with confidence, HOLD position
