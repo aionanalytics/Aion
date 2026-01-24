@@ -279,6 +279,14 @@ class AutoRetrainSystem:
     
     def _validate_new_models(self) -> Dict[str, Any]:
         """Validate new models on held-out data."""
+        # Validation metric estimation constants
+        MIN_ACCURACY = 0.5
+        MAX_ACCURACY = 0.7
+        ACCURACY_WIN_RATE_BOOST = 0.05
+        MIN_PROFIT_FACTOR = 1.0
+        BASE_PROFIT_FACTOR = 1.0
+        SHARPE_TO_PF_MULTIPLIER = 0.3
+        
         try:
             from dt_backend.ml.walk_forward_validator import WalkForwardValidator
             
@@ -305,10 +313,10 @@ class AutoRetrainSystem:
             windows = validation_result.get("windows", 0)
             
             # Estimate accuracy from win rate (conservative)
-            accuracy = max(0.5, min(0.7, avg_win_rate + 0.05))
+            accuracy = max(MIN_ACCURACY, min(MAX_ACCURACY, avg_win_rate + ACCURACY_WIN_RATE_BOOST))
             
             # Estimate profit factor from Sharpe (rough approximation)
-            profit_factor = max(1.0, 1.0 + (avg_sharpe * 0.3))
+            profit_factor = max(MIN_PROFIT_FACTOR, BASE_PROFIT_FACTOR + (avg_sharpe * SHARPE_TO_PF_MULTIPLIER))
             
             log(f"[auto_retrain] ✅ Validation: {windows} windows, win_rate={avg_win_rate:.2%}, sharpe={avg_sharpe:.2f}")
             
@@ -346,10 +354,11 @@ class AutoRetrainSystem:
     
     def _deploy_new_models(self) -> None:
         """Deploy new models to production."""
+        from shutil import copy2
+        from datetime import datetime
+        import lightgbm as lgb
+        
         try:
-            from shutil import copy2
-            from datetime import datetime
-            
             # Get model directory
             from dt_backend.ml.train_lightgbm_intraday import _resolve_model_dir
             model_dir = _resolve_model_dir()
@@ -380,7 +389,6 @@ class AutoRetrainSystem:
             
             # Verify model loads correctly
             try:
-                import lightgbm as lgb
                 booster = lgb.Booster(model_file=str(model_file))
                 log(f"[auto_retrain] ✅ Model integrity verified")
             except Exception as e:
@@ -394,10 +402,11 @@ class AutoRetrainSystem:
     
     def _rollback_models(self) -> None:
         """Rollback to previous models."""
+        from shutil import copy2
+        from datetime import datetime
+        import lightgbm as lgb
+        
         try:
-            from shutil import copy2
-            from datetime import datetime
-            
             # Get model directory
             from dt_backend.ml.train_lightgbm_intraday import _resolve_model_dir
             model_dir = _resolve_model_dir()
@@ -437,7 +446,6 @@ class AutoRetrainSystem:
             
             # Verify rollback integrity
             try:
-                import lightgbm as lgb
                 booster = lgb.Booster(model_file=str(model_file))
                 log(f"[auto_retrain] ✅ Rollback integrity verified")
             except Exception as e:

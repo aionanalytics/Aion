@@ -188,7 +188,21 @@ def _task_dashboard() -> Dict[str, Any]:
         
         # Update the unified cache which aggregates all dashboard data
         cache_service = UnifiedCacheService()
+        if cache_service is None:
+            log("[system_run] ❌ Failed to initialize UnifiedCacheService")
+            return {
+                "status": "error",
+                "error": "Failed to initialize cache service",
+            }
+        
         result = cache_service.update_all()
+        
+        if result is None:
+            log("[system_run] ❌ Cache update returned None")
+            return {
+                "status": "error",
+                "error": "Cache update failed",
+            }
         
         return {
             "status": "ok",
