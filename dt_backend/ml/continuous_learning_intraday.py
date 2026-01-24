@@ -118,22 +118,27 @@ def run_continuous_learning_intraday() -> None:
     else:
         log("[continuous_learning_intraday] ℹ️ Weights unchanged; nothing to update.")
 
-    # Check if auto-retraining should be triggered
-    retrain_metrics = {
-        "win_rate": metrics.get("win_rate", 0.0),
-        "sharpe_ratio": metrics.get("sharpe_ratio", 0.0),
-        "feature_drift": metrics.get("feature_drift", 0.0),
-    }
+    new_cfg.save()
+    log(
+        "[continuous_learning_intraday] ✅ Updated ensemble weights → "
+        f"LGB={new_cfg.w_lgb:.3f}, LSTM={new_cfg.w_lstm:.3f}, TRANSF={new_cfg.w_transf:.3f}"
+    )
     
-    should_retrain, reason = _global_trigger.check_and_trigger(retrain_metrics)
-    
-    if should_retrain:
-        log(f"[continuous_learning_intraday] 🔄 Triggering retrain: {reason}")
-        # Note: Actual retraining would be scheduled here
-        # For now, just record that we would retrain
-        _global_trigger.record_retrain()
-    else:
-        log(f"[continuous_learning_intraday] ✓ Metrics healthy, no retrain needed")
+    # Check for feature importance drift
+    try:
+        from dt_backend.ml.feature_importance_tracker import get_tracker
+        tracker = get_tracker()
+        
+        # Update feature importance stats
+        stats = tracker.update_stats()
+        log(f"[continuous_learning_intraday] 📊 Feature importance stats updated: {stats.get('total_predictions', 0)} predictions")
+        
+        # Detect drift
+        if tracker.detect_drift(threshold=0.15):
+            log("[continuous_learning_intraday] ⚠️ Feature importance drift detected!")
+            log("[continuous_learning_intraday] 💡 Consider retraining models with updated feature distributions")
+    except Exception as e:
+        log(f"[continuous_learning_intraday] ℹ️ Feature importance check skipped: {e}")
 
 
 if __name__ == "__main__":

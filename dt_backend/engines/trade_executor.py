@@ -72,6 +72,12 @@ try:
 except ImportError:
     DecisionRecorder = None  # type: ignore
 
+# Feature importance tracking for ML interpretability
+try:
+    from dt_backend.ml.feature_importance_tracker import get_tracker as get_feature_tracker
+except ImportError:
+    get_feature_tracker = None  # type: ignore
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -101,7 +107,13 @@ class ExecutionConfig:
     eod_flatten_minutes: int = 5
 
     # Anti-flip hysteresis (direction changes) after an exit
-    min_flip_minutes: int = TRADE_GAP_MIN_MINUTES
+    min_flip_minutes: int = 12
+    
+    # Minimum hold time before any exit is considered (prevents fast BUY->SELL flips)
+    min_hold_time_minutes: int = 10
+    
+    # Hard stop loss threshold (percentage) - exits allowed before min_hold_time if loss exceeds this
+    hard_stop_loss_pct: float = 2.0
 
     # Fallback risk if a plan doesn't specify stop/tp
     fallback_stop_atr: float = 1.25
@@ -139,6 +151,12 @@ def _cfg_from_env() -> ExecutionConfig:
     cfg.min_confidence = float(_safe_float(mc, cfg.min_confidence))
     dq = _env("DT_EXEC_DEFAULT_QTY", str(cfg.default_qty))
     cfg.default_qty = float(_safe_float(dq, cfg.default_qty))
+    # minimum hold time before exit
+    mht = _env("DT_MIN_HOLD_TIME_MINUTES", str(cfg.min_hold_time_minutes))
+    cfg.min_hold_time_minutes = int(_safe_float(mht, cfg.min_hold_time_minutes))
+    # hard stop loss percentage
+    hsl = _env("DT_HARD_STOP_LOSS_PCT", str(cfg.hard_stop_loss_pct))
+    cfg.hard_stop_loss_pct = float(_safe_float(hsl, cfg.hard_stop_loss_pct))
     return cfg
 
 
@@ -528,6 +546,17 @@ def execute_from_policy(
     if not isinstance(rolling, dict) or not rolling:
         log("[dt_exec] ⚠️ rolling empty; nothing to execute")
         return {"status": "empty", "orders": 0, "dry_run": cfg.dry_run}
+    
+    # Validate rolling structure before execution (PR #4)
+    try:
+        from dt_backend.core.schema_validator_dt import validate_rolling, ValidationError
+        validate_rolling(rolling)
+    except ValidationError as e:
+        log(f"[dt_exec] ❌ Validation error: {e}")
+        return {"error": str(e), "trades": [], "orders": 0}
+    except Exception as e:
+        log(f"[dt_exec] ⚠️ Validation exception: {e}")
+        # Continue execution despite validation errors
 
     # Initialize decision recorder for this cycle
     recorder = None
@@ -616,6 +645,22 @@ def execute_from_policy(
 
         side, size, conf = _extract_intent(node)
         considered += 1
+        
+        # Log feature importance for this trading decision
+        try:
+            if get_feature_tracker is not None:
+                feats = node.get("features_dt", {})
+                if isinstance(feats, dict) and feats:
+                    tracker = get_feature_tracker()
+                    tracker.log_prediction(
+                        symbol=sym,
+                        features_dict=feats,
+                        prediction=side,
+                        confidence=conf,
+                        metadata={"cycle": "execution"}
+                    )
+        except Exception as e:
+            debug(f"[dt_exec] Feature importance logging failed for {sym}: {e}")
 
         # Nothing to do.
         if side == "FLAT" or size <= 0.0:
@@ -687,6 +732,54 @@ def execute_from_policy(
         try:
             if pos is not None and getattr(pos, "qty", 0.0) > 0:  # We have a LONG position
                 if side == "SELL":
+                    # FIRST: Check minimum hold time to prevent fast flips
+                    # Don't exit position within first N minutes unless hard stop is hit
+                    from dt_backend.services.position_manager_dt import read_positions_state
+                    pos_state = read_positions_state()
+                    ps = pos_state.get(sym.upper(), {})
+                    
+                    if isinstance(ps, dict):
+                        entry_ts = _parse_utc_iso(ps.get("entry_ts"))
+                        if entry_ts is not None:
+                            hold_minutes = (ts_now - entry_ts).total_seconds() / 60.0
+                            
+                            # If held less than minimum hold time, block exit (unless hard stop)
+                            if hold_minutes < cfg.min_hold_time_minutes:
+                                # Check if this is a hard stop scenario (large loss)
+                                entry_price = float(getattr(pos, "avg_price", 0.0))
+                                last_price = _extract_last_price(node)
+                                pnl_pct = 0.0
+                                if entry_price > 0 and last_price > 0:
+                                    pnl_pct = ((last_price - entry_price) / entry_price) * 100.0
+                                
+                                # Only allow exit if hard stop hit (loss exceeds configured threshold)
+                                # Otherwise enforce minimum hold time
+                                if pnl_pct > -cfg.hard_stop_loss_pct:
+                                    blocked += 1
+                                    
+                                    # Update position hold tracking
+                                    try:
+                                        from dt_backend.services.position_manager_dt import update_position_hold_info
+                                        update_position_hold_info(
+                                            sym,
+                                            hold_reason="min_hold_time_not_met",
+                                            current_pnl_pct=pnl_pct,
+                                            now_utc=ts_now,
+                                        )
+                                    except Exception as e:
+                                        log(f"[dt_exec] ⚠️ Error updating position hold info for {sym}: {e}")
+                                    
+                                    append_trade_event({
+                                        "type": "position_hold",
+                                        "symbol": sym,
+                                        "reason": "min_hold_time_not_met",
+                                        "hold_minutes": hold_minutes,
+                                        "min_hold_minutes": cfg.min_hold_time_minutes,
+                                        "pnl_pct": pnl_pct,
+                                        "hold_strategy": "enforce_min_hold",
+                                    })
+                                    continue
+                    
                     # Check if BUY signal is still active (different from execution intent)
                     # Look at raw policy_dt for underlying signal strength
                     policy = node.get("policy_dt", {})
@@ -1192,6 +1285,15 @@ def execute_from_policy(
         debug("[dt_exec] 💾 saved rolling cache with position updates")
     except Exception as e:
         log(f"[dt_exec] ⚠️ failed to save rolling cache: {e}")
+    
+    # Check for feature importance drift (ML interpretability)
+    try:
+        if get_feature_tracker is not None and orders > 0:
+            tracker = get_feature_tracker()
+            if tracker.detect_drift(threshold=0.15):
+                log("[dt_exec] ⚠️ Feature importance drift detected - consider retraining")
+    except Exception as e:
+        debug(f"[dt_exec] Feature drift check failed: {e}")
 
     debug(f"[dt_exec] ✅ execute_from_policy done: {out}")
     return out

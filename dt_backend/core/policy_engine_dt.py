@@ -91,6 +91,11 @@ try:
 except Exception:
     select_best_setup = None  # type: ignore
 
+try:
+    from dt_backend.ml.feature_importance_tracker import get_tracker as get_feature_tracker
+except Exception:
+    get_feature_tracker = None  # type: ignore
+
 
 # ============================================================
 # 🔐 POSITION DETECTION (NEW, SAFE, BACKWARD-COMPATIBLE)
@@ -132,10 +137,10 @@ class PolicyConfig:
     bull_sell_penalty: float = REGIME_PENALTY_BULL_SELL
 
     # Stability / anti-flip
-    hysteresis_hold_bias: float = EDGE_HOLD_BIAS     # make HOLD "sticky" by requiring extra edge to flip
-    min_edge_to_flip: float = EDGE_MIN_TO_FLIP         # require at least this edge magnitude to flip direction
-    confirmations_to_flip: int = CONFIRMATIONS_TO_FLIP         # require N consecutive signals before switching BUY<->SELL
-    max_confidence: float = CONFIDENCE_MAX
+    hysteresis_hold_bias: float = 0.03     # make HOLD "sticky" by requiring extra edge to flip
+    min_edge_to_flip: float = 0.12         # require at least this edge magnitude to flip direction (raised from 0.06)
+    confirmations_to_flip: int = 2         # require N consecutive signals before switching BUY<->SELL
+    max_confidence: float = 0.99
 
     # Safety gate: in crash/stress regimes, optionally stand down
     stand_down_in_unknown_regime: bool = False
@@ -933,6 +938,21 @@ def apply_intraday_policy(
                 "bot": node["execution_plan_dt"].get("bot"),
                 "_state": new_state,
             }
+            
+            # Log feature importance for this policy decision
+            try:
+                if get_feature_tracker is not None and isinstance(feats, dict) and feats:
+                    tracker = get_feature_tracker()
+                    tracker.log_prediction(
+                        symbol=sym,
+                        features_dict=feats,
+                        prediction=action,
+                        confidence=float(conf_final),
+                        metadata={"cycle": "policy", "bot": node["execution_plan_dt"].get("bot")}
+                    )
+            except Exception:
+                pass
+            
             rolling[sym] = node
             updated += 1
             continue
@@ -1050,6 +1070,21 @@ def apply_intraday_policy(
             "ts": _utc_now_iso(),
             "_state": new_state if isinstance(new_state, dict) else {},
         }
+        
+        # Log feature importance for model-based policy decision
+        try:
+            if get_feature_tracker is not None and isinstance(feats, dict) and feats:
+                tracker = get_feature_tracker()
+                tracker.log_prediction(
+                    symbol=sym,
+                    features_dict=feats,
+                    prediction=action,
+                    confidence=float(conf_final),
+                    metadata={"cycle": "policy", "model": "ensemble"}
+                )
+        except Exception:
+            pass
+        
         rolling[sym] = node
         updated += 1
 
@@ -1115,6 +1150,16 @@ def apply_intraday_policy(
 
     if save:
         save_rolling(rolling)
+    
+    # Validate rolling structure before returning (PR #4)
+    try:
+        from dt_backend.core.schema_validator_dt import validate_rolling, ValidationError
+        validate_rolling(rolling)
+    except ValidationError as e:
+        log(f"[policy_dt] ❌ Schema validation failed: {e}")
+        # Log but don't raise - allow graceful degradation
+    except Exception as e:
+        log(f"[policy_dt] ⚠️ Validation error: {e}")
 
     extra = f", capped={capped}, max_positions={max_positions_n}" if max_positions_n is not None else ""
     lane_note = f", lane_symbols={len(lane_syms)}" if isinstance(lane_syms, list) else ""
