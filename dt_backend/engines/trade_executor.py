@@ -25,15 +25,25 @@ v0.3 updates
 from __future__ import annotations
 
 import os
+import traceback
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from dt_backend.core.data_pipeline_dt import _read_rolling, save_rolling
 from dt_backend.core.logger_dt import log, debug
 from dt_backend.core.time_override_dt import now_utc as _now_utc_override
+from dt_backend.core.constants_dt import HOLD_MIN_TIME_MINUTES, POSITION_MAX_FRACTION
 from dt_backend.services.dt_truth_store import append_trade_event, bump_metric
 from dt_backend.services import execution_ledger
+from dt_backend.core.constants_dt import (
+    ORDERS_MAX_PER_CYCLE,
+    TRADE_GAP_MIN_MINUTES,
+    ORDER_TIMEOUT_SEC,
+    HOLD_MIN_TIME_MINUTES,
+    CONFIDENCE_MIN_EXEC,
+    POSITION_DEFAULT_QTY,
+)
 
 # Optional: dt_state tags (safe if unavailable)
 try:
@@ -58,11 +68,23 @@ except ImportError:
     alert_dt = None  # type: ignore
     alert_error = None  # type: ignore
 
+# Slack-aware logger for error forwarding
+try:
+    from backend.monitoring.log_aggregator import get_aggregator
+except ImportError:
+    get_aggregator = None  # type: ignore
+
 # Decision recorder for replay/analysis
 try:
     from dt_backend.services.decision_recorder import DecisionRecorder
 except ImportError:
     DecisionRecorder = None  # type: ignore
+
+# Feature importance tracking for ML interpretability
+try:
+    from dt_backend.ml.feature_importance_tracker import get_tracker as get_feature_tracker
+except ImportError:
+    get_feature_tracker = None  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -82,10 +104,10 @@ class ExecutionConfig:
     """
 
     dry_run: bool = True
-    max_orders_per_cycle: int = 5
+    max_orders_per_cycle: int = ORDERS_MAX_PER_CYCLE
     allow_shorts: bool = False
-    min_confidence: float = 0.25
-    default_qty: float = 1.0
+    min_confidence: float = CONFIDENCE_MIN_EXEC
+    default_qty: float = POSITION_DEFAULT_QTY
 
     # Phase 5: synthetic brackets + state machine
     enable_brackets: bool = True
@@ -94,6 +116,12 @@ class ExecutionConfig:
 
     # Anti-flip hysteresis (direction changes) after an exit
     min_flip_minutes: int = 12
+    
+    # Minimum hold time before any exit is considered (prevents fast BUY->SELL flips)
+    min_hold_time_minutes: int = 10
+    
+    # Hard stop loss threshold (percentage) - exits allowed before min_hold_time if loss exceeds this
+    hard_stop_loss_pct: float = 2.0
 
     # Fallback risk if a plan doesn't specify stop/tp
     fallback_stop_atr: float = 1.25
@@ -103,6 +131,13 @@ class ExecutionConfig:
     trail_atr_mult: float = 1.2
     scratch_min: int = 12
     scratch_atr_frac: float = 0.15
+    
+    # Bug Fix #1: Minimum hold time
+    min_hold_time_minutes: int = HOLD_MIN_TIME_MINUTES
+    
+    # Bug Fix #2: Position sizing parameters
+    min_phit: float = 0.50  # Minimum P(Hit) to consider trading
+    max_symbol_fraction: float = 0.15  # Maximum fraction of portfolio per symbol
 
 
 def _safe_float(x: Any, default: float = 0.0) -> float:
@@ -131,6 +166,12 @@ def _cfg_from_env() -> ExecutionConfig:
     cfg.min_confidence = float(_safe_float(mc, cfg.min_confidence))
     dq = _env("DT_EXEC_DEFAULT_QTY", str(cfg.default_qty))
     cfg.default_qty = float(_safe_float(dq, cfg.default_qty))
+    # minimum hold time before exit
+    mht = _env("DT_MIN_HOLD_TIME_MINUTES", str(cfg.min_hold_time_minutes))
+    cfg.min_hold_time_minutes = int(_safe_float(mht, cfg.min_hold_time_minutes))
+    # hard stop loss percentage
+    hsl = _env("DT_HARD_STOP_LOSS_PCT", str(cfg.hard_stop_loss_pct))
+    cfg.hard_stop_loss_pct = float(_safe_float(hsl, cfg.hard_stop_loss_pct))
     return cfg
 
 
@@ -228,6 +269,8 @@ def _run_liquidation_if_enabled(broker: BrokerAPI, cfg: ExecutionConfig, *, now_
     dedup = bool(s.get("dedup"))
     ttl_sec = int(s.get("ttl_sec") or 180)
 
+    log(f"[dt_exec] 🚨 Liquidation mode enabled: scope={scope} target={target} max={max_orders}")
+
     inflight = _load_inflight() if dedup else {}
     inflight = _prune_inflight(inflight, now_utc=now_utc, ttl_sec=ttl_sec) if dedup else {}
 
@@ -265,6 +308,7 @@ def _run_liquidation_if_enabled(broker: BrokerAPI, cfg: ExecutionConfig, *, now_
         side = "SELL" if qty > 0 else "BUY"  # cover shorts if any
         order = Order(symbol=sym_u, side=side, qty=abs(qty), limit_price=None)
 
+        log(f"[dt_exec] 🚨 Liquidating position: {sym_u} {side} {abs(qty)}")
         append_trade_event(
             {
                 "type": "liquidate_intent",
@@ -325,6 +369,9 @@ def _run_liquidation_if_enabled(broker: BrokerAPI, cfg: ExecutionConfig, *, now_
             sent += 1
         except Exception as e:
             errors += 1
+            log(f"[dt_exec] ⚠️ Liquidation error for {sym_u}: {e}", level="error")
+            if get_aggregator is not None:
+                get_aggregator().forward_log("ERROR", f"Liquidation error for {sym_u}: {e}", "dt_exec")
             append_trade_event(
                 {
                     "type": "liquidate_error",
@@ -345,7 +392,7 @@ def _run_liquidation_if_enabled(broker: BrokerAPI, cfg: ExecutionConfig, *, now_
         inflight = _prune_inflight(inflight, now_utc=now_utc, ttl_sec=ttl_sec)
         _save_inflight(inflight)
 
-    return {
+    summary = {
         "status": "ok",
         "enabled": True,
         "scope": scope,
@@ -361,6 +408,11 @@ def _run_liquidation_if_enabled(broker: BrokerAPI, cfg: ExecutionConfig, *, now_
         "rejected": rejected,
         "errors": errors,
     }
+    
+    if sent > 0:
+        log(f"[dt_exec] 🚨 Liquidation complete: sent={sent} accepted={accepted} rejected={rejected} errors={errors}")
+    
+    return summary
 
 
 def _extract_intent(node: Dict[str, Any]) -> Tuple[str, float, float]:
@@ -422,6 +474,105 @@ def _extract_atr(node: Dict[str, Any]) -> float:
         except Exception:
             return 0.0
     return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Bug Fix #1: Minimum hold time enforcement
+# ---------------------------------------------------------------------------
+
+
+def _can_exit_position(node: Dict, entry_ts: str, cfg: ExecutionConfig) -> Tuple[bool, str]:
+    """
+    Check if position held long enough to exit.
+    
+    Returns: (can_exit: bool, reason: str)
+    """
+    if not entry_ts:
+        return True, "no_entry_timestamp"
+    
+    try:
+        entry_dt = datetime.fromisoformat(entry_ts.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        hold_minutes = (now - entry_dt).total_seconds() / 60.0
+        
+        if hold_minutes < cfg.min_hold_time_minutes:
+            return False, f"held_{hold_minutes:.0f}m_<_{cfg.min_hold_time_minutes}m"
+        
+        return True, None
+    except Exception as e:
+        log(f"[dt_exec] ⚠️ Error checking hold time: {e}", level="error")
+        if get_aggregator is not None:
+            get_aggregator().forward_log("ERROR", f"Hold time check error: {e}", "dt_exec")
+        return True, None
+
+
+# ---------------------------------------------------------------------------
+# Bug Fix #2: Conviction-based position sizing
+# ---------------------------------------------------------------------------
+
+
+def _size_from_phit_with_conviction(
+    phit: float,
+    expected_r: float,
+    vol_bkt: str,
+    position_qty: float = 0.0,
+    cfg: ExecutionConfig = None,
+) -> float:
+    """
+    Calculate position size based on conviction (P(Hit)) with position-aware scaling.
+    
+    Logic:
+    - If no position: size based on P(Hit) conviction
+    - If small position (<50% of target): scale up
+    - If at target position: reduce size
+    - If above target: reduce or reverse
+    """
+    cfg = cfg or ExecutionConfig()
+    phit = _safe_float(phit, 0.5)
+    
+    # Check minimum P(Hit) threshold
+    if phit < cfg.min_phit:
+        return 0.0
+    
+    # Base edge from calibrated probability
+    # P(Hit) = 0.52 → edge = 0.04
+    # P(Hit) = 0.75 → edge = 0.50
+    edge = max(0.0, min(1.0, (phit - 0.5) / 0.5))
+    
+    # Risk-reward scaling
+    er = max(0.5, min(2.0, _safe_float(expected_r, 1.0)))
+    r_factor = 0.5 + 0.5 * (er / 2.0)  # 0.5..1.0
+    
+    # Volatility scaling
+    vol_scale = {
+        "high": 0.4,     # High vol: reduce size
+        "medium": 0.7,   # Medium vol: normal size
+        "low": 1.0,      # Low vol: full size
+    }.get(vol_bkt, 0.7)
+    
+    # Base size from conviction
+    base_size = cfg.max_symbol_fraction * edge * r_factor * vol_scale
+    
+    # Position-aware scaling
+    if position_qty > 0:
+        # Calculate target position (full conviction)
+        target_qty = cfg.max_symbol_fraction * POSITION_MAX_FRACTION
+        current_fraction = position_qty / target_qty if target_qty > 0 else 0
+        
+        if current_fraction >= 0.9:
+            # Already at/above target: reduce size
+            base_size *= 0.3
+        elif current_fraction >= 0.5:
+            # Halfway to target: maintain pace
+            base_size = base_size  # No change
+        elif current_fraction >= 0.25:
+            # Quarter to target: scale up moderately
+            base_size *= 1.2
+        else:
+            # Well below target: scale up aggressively
+            base_size *= 1.5
+    
+    return max(0.0, min(cfg.max_symbol_fraction, base_size))
 
 
 def _entry_meta_from_global(rolling: Dict[str, Any], now_utc: Optional[datetime] = None) -> Dict[str, Any]:
@@ -517,9 +668,30 @@ def execute_from_policy(
     """
     cfg = _cfg_from_env() if cfg is None else cfg
     rolling = _read_rolling() or {}
+    
+    # Build initial symbol list for cycle start logging
     if not isinstance(rolling, dict) or not rolling:
         log("[dt_exec] ⚠️ rolling empty; nothing to execute")
         return {"status": "empty", "orders": 0, "dry_run": cfg.dry_run}
+    
+    initial_symbols = [s for s in rolling.keys() if isinstance(s, str) and not s.startswith("_")]
+    log(f"[dt_exec] 🚀 Starting execution cycle: symbols={len(initial_symbols)}")
+    
+    # Validate rolling structure before execution (PR #4)
+    try:
+        from dt_backend.core.schema_validator_dt import validate_rolling, ValidationError
+        validate_rolling(rolling)
+        log("[dt_exec] ✅ Rolling validation passed")
+    except ValidationError as e:
+        log(f"[dt_exec] ❌ Validation error: {e}", level="error")
+        if get_aggregator is not None:
+            get_aggregator().forward_log("ERROR", f"Validation error: {e}", "dt_exec")
+        return {"error": str(e), "trades": [], "orders": 0}
+    except Exception as e:
+        log(f"[dt_exec] ⚠️ Validation exception: {e}", level="error")
+        if get_aggregator is not None:
+            get_aggregator().forward_log("ERROR", f"Validation exception: {e}", "dt_exec")
+        # Continue execution despite validation errors
 
     # Initialize decision recorder for this cycle
     recorder = None
@@ -608,6 +780,26 @@ def execute_from_policy(
 
         side, size, conf = _extract_intent(node)
         considered += 1
+        
+        # Log intent for this symbol
+        if side != "FLAT" and size > 0.0:
+            debug(f"[dt_exec] 📊 {sym}: intent={side} size={size:.3f} conf={conf:.2%}")
+        
+        # Log feature importance for this trading decision
+        try:
+            if get_feature_tracker is not None:
+                feats = node.get("features_dt", {})
+                if isinstance(feats, dict) and feats:
+                    tracker = get_feature_tracker()
+                    tracker.log_prediction(
+                        symbol=sym,
+                        features_dict=feats,
+                        prediction=side,
+                        confidence=conf,
+                        metadata={"cycle": "execution"}
+                    )
+        except Exception as e:
+            debug(f"[dt_exec] Feature importance logging failed for {sym}: {e}")
 
         # Nothing to do.
         if side == "FLAT" or size <= 0.0:
@@ -615,6 +807,7 @@ def execute_from_policy(
 
         if conf < float(cfg.min_confidence):
             blocked += 1
+            debug(f"[dt_exec] ⚠️ Risk check failed: {sym} conf={conf:.2%} < min={cfg.min_confidence:.2%}")
             append_trade_event(
                 {
                     "type": "no_trade",
@@ -640,7 +833,8 @@ def execute_from_policy(
                         "lgb_prob": conf,
                     }
                     track_missed_signal(signal, f"conf<{cfg.min_confidence}")
-            except Exception:
+            except Exception as e:
+                debug(f"[dt_exec] Failed to track missed signal for {sym}: {e}")
                 pass
             
             continue
@@ -656,6 +850,7 @@ def execute_from_policy(
                     age_min = (ts_now - last_exit_ts).total_seconds() / 60.0
                     if age_min < float(cfg.min_flip_minutes):
                         blocked += 1
+                        log(f"[dt_exec] 🔄 Trade gap enforcement for {sym}: cooldown {age_min:.1f}m < {cfg.min_flip_minutes}m")
                         append_trade_event(
                             {
                                 "type": "no_trade",
@@ -671,6 +866,50 @@ def execute_from_policy(
             pass
 
         # ============================================================================
+        # BUG FIX #1: Minimum Hold Time Check
+        # ============================================================================
+        # Prevent 2-minute buy/sell flips by enforcing minimum hold time
+        if side == "SELL":
+            try:
+                # Get position entry timestamp
+                position_dt = node.get("position_dt", {})
+                entry_ts = position_dt.get("entry_ts") if isinstance(position_dt, dict) else None
+                
+                # If no entry_ts in position_dt, try to get it from position manager
+                if not entry_ts and pos is not None:
+                    try:
+                        entry_ts = getattr(pos, "entry_ts", None)
+                    except Exception:
+                        pass
+                
+                if entry_ts:
+                    can_exit, reason = _can_exit_position(
+                        node=node,
+                        entry_ts=entry_ts,
+                        cfg=cfg
+                    )
+                    
+                    if not can_exit:
+                        blocked += 1
+                        log(f"[dt_exec] ⏱️ Hold time check for {sym}: {reason}")
+                        append_trade_event(
+                            {
+                                "type": "no_trade",
+                                "symbol": sym,
+                                "reason": f"min_hold_time: {reason}",
+                                "side": side,
+                                "confidence": conf,
+                                "size": size,
+                            }
+                        )
+                        log(f"[exec] ⏸ {sym}: {reason} - holding position")
+                        continue
+            except Exception as e:
+                log(f"[exec] ⚠️ Error checking hold time for {sym}: {e}", level="error")
+                if get_aggregator is not None:
+                    get_aggregator().forward_log("ERROR", f"Hold time validation error for {sym}: {e}", "dt_exec")
+
+        # ============================================================================
         # INTELLIGENT POSITION HOLDING (Human Day Trader Logic)
         # ============================================================================
         # If we have an open position and signal says SELL, apply hold strategy
@@ -679,6 +918,54 @@ def execute_from_policy(
         try:
             if pos is not None and getattr(pos, "qty", 0.0) > 0:  # We have a LONG position
                 if side == "SELL":
+                    # FIRST: Check minimum hold time to prevent fast flips
+                    # Don't exit position within first N minutes unless hard stop is hit
+                    from dt_backend.services.position_manager_dt import read_positions_state
+                    pos_state = read_positions_state()
+                    ps = pos_state.get(sym.upper(), {})
+                    
+                    if isinstance(ps, dict):
+                        entry_ts = _parse_utc_iso(ps.get("entry_ts"))
+                        if entry_ts is not None:
+                            hold_minutes = (ts_now - entry_ts).total_seconds() / 60.0
+                            
+                            # If held less than minimum hold time, block exit (unless hard stop)
+                            if hold_minutes < cfg.min_hold_time_minutes:
+                                # Check if this is a hard stop scenario (large loss)
+                                entry_price = float(getattr(pos, "avg_price", 0.0))
+                                last_price = _extract_last_price(node)
+                                pnl_pct = 0.0
+                                if entry_price > 0 and last_price > 0:
+                                    pnl_pct = ((last_price - entry_price) / entry_price) * 100.0
+                                
+                                # Only allow exit if hard stop hit (loss exceeds configured threshold)
+                                # Otherwise enforce minimum hold time
+                                if pnl_pct > -cfg.hard_stop_loss_pct:
+                                    blocked += 1
+                                    
+                                    # Update position hold tracking
+                                    try:
+                                        from dt_backend.services.position_manager_dt import update_position_hold_info
+                                        update_position_hold_info(
+                                            sym,
+                                            hold_reason="min_hold_time_not_met",
+                                            current_pnl_pct=pnl_pct,
+                                            now_utc=ts_now,
+                                        )
+                                    except Exception as e:
+                                        log(f"[dt_exec] ⚠️ Error updating position hold info for {sym}: {e}")
+                                    
+                                    append_trade_event({
+                                        "type": "position_hold",
+                                        "symbol": sym,
+                                        "reason": "min_hold_time_not_met",
+                                        "hold_minutes": hold_minutes,
+                                        "min_hold_minutes": cfg.min_hold_time_minutes,
+                                        "pnl_pct": pnl_pct,
+                                        "hold_strategy": "enforce_min_hold",
+                                    })
+                                    continue
+                    
                     # Check if BUY signal is still active (different from execution intent)
                     # Look at raw policy_dt for underlying signal strength
                     policy = node.get("policy_dt", {})
@@ -801,17 +1088,22 @@ def execute_from_policy(
                                 # But also respect hard stops from position_manager_dt
                         except Exception as e:
                             # Log error but continue - don't block trading on PnL calculation issues
-                            log(f"[dt_exec] ⚠️ Error calculating PnL for {sym}: {e}")
+                            log(f"[dt_exec] ⚠️ Error calculating PnL for {sym}: {e}", level="error")
+                            if get_aggregator is not None:
+                                get_aggregator().forward_log("ERROR", f"PnL calculation error for {sym}: {e}", "dt_exec")
                             pass
         except Exception as e:
             # Log error but continue - don't block trading on position hold logic issues
-            log(f"[dt_exec] ⚠️ Error in position hold logic for {sym}: {e}")
+            log(f"[dt_exec] ⚠️ Error in position hold logic for {sym}: {e}", level="error")
+            if get_aggregator is not None:
+                get_aggregator().forward_log("ERROR", f"Position hold logic error for {sym}: {e}", "dt_exec")
             pass
 
         # Don't stack entries in the same direction (keeps it sane).
         try:
             if side == "BUY" and pos is not None and getattr(pos, "qty", 0.0) > 0:
                 blocked += 1
+                debug(f"[dt_exec] 🚫 Position limit: {sym} already long, not stacking")
                 append_trade_event({"type": "no_trade", "symbol": sym, "reason": "already_long", "side": side, "confidence": conf, "size": size})
                 continue
         except Exception:
@@ -820,6 +1112,7 @@ def execute_from_policy(
         # Phase 0 only closes longs on SELL unless allow_shorts is enabled.
         if side == "SELL" and (pos is None or getattr(pos, "qty", 0.0) <= 0.0) and not cfg.allow_shorts:
             blocked += 1
+            debug(f"[dt_exec] 🚫 Risk check: {sym} SELL without position (shorts disabled)")
             append_trade_event(
                 {
                     "type": "no_trade",
@@ -832,7 +1125,82 @@ def execute_from_policy(
             )
             continue
 
-        qty = _qty_from_size(size, cfg)
+        # ============================================================================
+        # BUG FIX #2: Conviction-Based Position Sizing
+        # ============================================================================
+        # Calculate qty based on conviction (P(Hit)) with position-aware scaling
+        try:
+            # Get current position qty for position-aware scaling
+            current_qty = float(getattr(pos, "qty", 0.0)) if pos else 0.0
+            
+            # Extract policy features for conviction sizing
+            policy = node.get("policy_dt", {})
+            phit = _safe_float(policy.get("p_hit"), conf) if isinstance(policy, dict) else conf
+            
+            # Get expected R from execution plan or features
+            plan = node.get("execution_plan_dt", {})
+            features = node.get("features_dt", {})
+            expected_r = 1.0
+            if isinstance(plan, dict) and plan.get("risk"):
+                risk = plan.get("risk")
+                if isinstance(risk, dict):
+                    stop = risk.get("stop")
+                    tp = risk.get("take_profit")
+                    last_px = _extract_last_price(node)
+                    if stop and tp and last_px > 0:
+                        r_dist = abs(tp - last_px)
+                        stop_dist = abs(last_px - stop)
+                        if stop_dist > 0:
+                            expected_r = r_dist / stop_dist
+            
+            # Get volatility bucket
+            vol_bkt = "medium"
+            if isinstance(features, dict):
+                atr = _safe_float(features.get("atr_14"), 0.0)
+                last_px = _extract_last_price(node)
+                if atr > 0 and last_px > 0:
+                    atr_pct = (atr / last_px) * 100.0
+                    if atr_pct > 3.0:
+                        vol_bkt = "high"
+                    elif atr_pct < 1.5:
+                        vol_bkt = "low"
+            
+            # Calculate conviction-aware size (fraction of portfolio)
+            size_fraction = _size_from_phit_with_conviction(
+                phit=phit,
+                expected_r=expected_r,
+                vol_bkt=vol_bkt,
+                position_qty=abs(current_qty),
+                cfg=cfg
+            )
+            
+            debug(f"[dt_exec] 🎯 Conviction sizing: phit={phit:.2%} → size={size_fraction:.3f}")
+            
+            # Convert size fraction to share quantity
+            # Get account equity for position sizing
+            last_px = _extract_last_price(node)
+            if last_px > 0 and size_fraction > 0:
+                # Estimate equity (can be improved with actual account value)
+                equity = 100000.0  # Default assumption
+                try:
+                    account = broker.get_account()
+                    if isinstance(account, dict):
+                        equity = _safe_float(account.get("equity", 100000.0), 100000.0)
+                except Exception as e:
+                    debug(f"[dt_exec] Failed to get account equity for {sym}: {e}")
+                    pass
+                
+                qty = max(1, int(size_fraction * equity / last_px))
+            else:
+                # Fallback to old method if something went wrong
+                qty = _qty_from_size(size, cfg)
+        except Exception as e:
+            log(f"[exec] ⚠️ Error in conviction sizing for {sym}: {e}", level="error")
+            if get_aggregator is not None:
+                get_aggregator().forward_log("ERROR", f"Conviction sizing error for {sym}: {e}", "dt_exec")
+            # Fallback to old method
+            qty = _qty_from_size(size, cfg)
+        
         if qty <= 0.0:
             continue
 
@@ -864,6 +1232,7 @@ def execute_from_policy(
                 
                 if trades_today >= max_daily:
                     blocked += 1
+                    log(f"[dt_exec] 🛑 Emergency stop: {sym} reached daily trade limit ({trades_today}/{max_daily})")
                     plan = node.get("execution_plan_dt") if isinstance(node.get("execution_plan_dt"), dict) else {}
                     append_trade_event({
                         "type": "no_trade",
@@ -873,7 +1242,8 @@ def execute_from_policy(
                         "bot": plan.get("bot") if isinstance(plan, dict) else None,
                     })
                     continue  # Skip this symbol
-            except Exception:
+            except Exception as e:
+                debug(f"[dt_exec] Failed to check daily trade limit for {sym}: {e}")
                 pass
         
         # NEW (Phase 3): Max loss per symbol per day check
@@ -885,6 +1255,7 @@ def execute_from_policy(
                 
                 if symbol_pnl < -abs(max_loss_per_symbol):
                     blocked += 1
+                    log(f"[dt_exec] 🛑 Emergency stop: {sym} max daily loss hit pnl=${symbol_pnl:.2f} limit=${max_loss_per_symbol:.2f}")
                     append_trade_event({
                         "type": "no_trade",
                         "symbol": sym,
@@ -894,7 +1265,8 @@ def execute_from_policy(
                         "size": size,
                     })
                     continue  # Skip this symbol
-            except Exception:
+            except Exception as e:
+                debug(f"[dt_exec] Failed to check max loss per symbol for {sym}: {e}")
                 pass
 
         try:
@@ -922,9 +1294,11 @@ def execute_from_policy(
             debug(f"[dt_exec] 📝 Phase 1 (pending): {exec_id} {side} {qty} {sym}")
             
             # Submit order to broker
+            log(f"[dt_exec] 📤 Submitting order: {sym} {side} {qty} @ ${last_px:.2f}")
             res = broker.submit_order(order, last_price=(last_px if last_px > 0 else None))
             orders += 1
             bump_metric("orders_submitted", 1.0)
+            log(f"[dt_exec] ✅ Order submitted: {sym} {side} {qty}")
             append_trade_event(
                 {
                     "type": "order_result",
@@ -1131,7 +1505,10 @@ def execute_from_policy(
                         log(f"[dt_exec] ❌ Order not filled: {exec_id} status={status}")
             except Exception as e:
                 # Something went wrong during position update, record failure
-                log(f"[dt_exec] ⚠️ Error in saga phase 2/3 for {exec_id}: {e}")
+                log(f"[dt_exec] ⚠️ Error in saga phase 2/3 for {exec_id}: {e}", level="error")
+                if get_aggregator is not None:
+                    stack_trace = traceback.format_exc()
+                    get_aggregator().forward_log("ERROR", f"Saga phase 2/3 error for {exec_id}: {e}\n{stack_trace}", "dt_exec")
                 execution_ledger.record_failed(
                     execution_id=exec_id,
                     error_msg=f"Phase 2/3 error: {str(e)[:200]}",
@@ -1140,6 +1517,12 @@ def execute_from_policy(
         except Exception as e:
             blocked += 1
             bump_metric("order_errors", 1.0)
+            
+            # Log error with full details and send to Slack
+            log(f"[dt_exec] ⚠️ Error processing {sym}: {e}", level="error")
+            if get_aggregator is not None:
+                stack_trace = traceback.format_exc()
+                get_aggregator().forward_log("ERROR", f"Order error for {sym}: {e}\n{stack_trace}", "dt_exec")
             
             # Try to record failure in ledger if we have exec_id
             if exec_id is not None:
@@ -1184,6 +1567,16 @@ def execute_from_policy(
         debug("[dt_exec] 💾 saved rolling cache with position updates")
     except Exception as e:
         log(f"[dt_exec] ⚠️ failed to save rolling cache: {e}")
+    
+    # Check for feature importance drift (ML interpretability)
+    try:
+        if get_feature_tracker is not None and orders > 0:
+            tracker = get_feature_tracker()
+            if tracker.detect_drift(threshold=0.15):
+                log("[dt_exec] ⚠️ Feature importance drift detected - consider retraining")
+    except Exception as e:
+        debug(f"[dt_exec] Feature drift check failed: {e}")
 
     debug(f"[dt_exec] ✅ execute_from_policy done: {out}")
+    log(f"[dt_exec] ✅ Execution complete: orders={orders} blocked={blocked} considered={considered}")
     return out

@@ -1,0 +1,157 @@
+name: Test and Validate
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+      fail-fast: false
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+    
+    - name: Validate configuration
+      run: |
+        python -m dt_backend.core.knob_validator_dt
+    
+    - name: Run unit tests with coverage
+      run: |
+        pytest tests/unit/ --cov=dt_backend --cov=backend --cov-report=xml --cov-report=term --cov-report=term-missing
+      env:
+        # Mock env for testing
+        DT_DRY_RUN: "1"
+        DT_MAX_POSITIONS: "3"
+        DT_EXEC_MIN_CONF: "0.40"
+    
+    - name: Check coverage threshold
+      run: |
+        coverage report --fail-under=80
+    
+    - name: Run integration tests (if exist)
+      if: hashFiles('tests/integration/**') != ''
+      run: |
+        pytest tests/integration/ --timeout=30
+      continue-on-error: true
+      env:
+        DT_DRY_RUN: "1"
+    
+    - name: Test replay engine
+      run: |
+        python -c "
+        import sys
+        from pathlib import Path
+        replay_test = Path('test_replay_system.py')
+        if replay_test.exists():
+            import subprocess
+            result = subprocess.run([sys.executable, str(replay_test)], capture_output=True, timeout=30)
+            print(result.stdout.decode())
+            if result.returncode != 0:
+                print('⚠️ Replay engine test had issues:', result.stderr.decode())
+        else:
+            print('✅ No replay test file found, skipping')
+        "
+      continue-on-error: true
+    
+    - name: Lint with flake8
+      run: |
+        pip install flake8
+        flake8 dt_backend backend --max-line-length=120 --ignore=E501,W503,E203 --count --show-source --statistics
+      continue-on-error: true
+    
+    - name: Type check with mypy (optional)
+      run: |
+        pip install mypy
+        mypy dt_backend backend --ignore-missing-imports --no-strict-optional
+      continue-on-error: true
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-python-${{ matrix.python-version }}
+        fail_ci_if_error: false
+      env:
+        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+  
+  lint:
+    name: Lint and Format Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+        cache: 'pip'
+    
+    - name: Install linting tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install ruff black
+    
+    - name: Run ruff
+      run: |
+        ruff check backend/ dt_backend/ tests/ --output-format=github
+      continue-on-error: true
+    
+    - name: Check formatting with black
+      run: |
+        black --check backend/ dt_backend/ tests/
+      continue-on-error: true
+  
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+        cache: 'pip'
+    
+    - name: Install security tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install bandit safety
+    
+    - name: Run bandit security scan
+      run: |
+        bandit -r backend/ dt_backend/ -f json -o bandit-report.json || true
+        bandit -r backend/ dt_backend/ -f screen
+      continue-on-error: true
+    
+    - name: Check dependencies for known vulnerabilities
+      run: |
+        pip install -r requirements.txt
+        safety check --json || true
+        safety check
+      continue-on-error: true

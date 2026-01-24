@@ -38,6 +38,22 @@ from typing import Any, Dict, List, Tuple, Optional
 
 from dt_backend.tuning.dt_profile_loader import load_dt_profile, strategy_weight
 from .data_pipeline_dt import _read_rolling, save_rolling, ensure_symbol_node, log
+from dt_backend.core.constants_dt import (
+    CONFIDENCE_MIN,
+    CONFIDENCE_MAX,
+    EDGE_MIN_TO_FLIP,
+    EDGE_HOLD_BIAS,
+    CONFIRMATIONS_TO_FLIP,
+    VOL_PENALTY_HIGH,
+    VOL_PENALTY_MEDIUM,
+    TREND_BOOST_STRONG,
+    TREND_BOOST_MILD,
+    REGIME_PENALTY_CHOP,
+    REGIME_PENALTY_BEAR_BUY,
+    REGIME_PENALTY_BULL_SELL,
+    BUY_THRESHOLD,
+    SELL_THRESHOLD,
+)
 
 # --- OPTIONAL IMPORTS (UNCHANGED) ---
 try:
@@ -75,6 +91,16 @@ try:
 except Exception:
     select_best_setup = None  # type: ignore
 
+try:
+    from dt_backend.ml.feature_importance_tracker import get_tracker as get_feature_tracker
+except Exception:
+    get_feature_tracker = None  # type: ignore
+
+try:
+    from backend.monitoring.log_aggregator import get_aggregator
+except ImportError:
+    get_aggregator = None  # type: ignore
+
 
 # ============================================================
 # 🔐 POSITION DETECTION (NEW, SAFE, BACKWARD-COMPATIBLE)
@@ -96,28 +122,28 @@ def _has_position(node: Dict[str, Any]) -> bool:
 @dataclass
 class PolicyConfig:
     # Signal edge thresholds (p_buy - p_sell)
-    buy_threshold: float = 0.12
-    sell_threshold: float = -0.12
+    buy_threshold: float = BUY_THRESHOLD
+    sell_threshold: float = SELL_THRESHOLD
 
     # Minimum confidence for acting (after adjustments)
-    min_confidence: float = 0.30
+    min_confidence: float = CONFIDENCE_MIN
 
     # Volatility penalties
-    vol_penalty_high: float = 0.65
-    vol_penalty_medium: float = 0.85
+    vol_penalty_high: float = VOL_PENALTY_HIGH
+    vol_penalty_medium: float = VOL_PENALTY_MEDIUM
 
     # Trend boosts when aligned
-    trend_boost_strong: float = 1.25
-    trend_boost_mild: float = 1.10
+    trend_boost_strong: float = TREND_BOOST_STRONG
+    trend_boost_mild: float = TREND_BOOST_MILD
 
     # Regime effects
-    chop_penalty: float = 0.90
-    bear_buy_penalty: float = 0.85
-    bull_sell_penalty: float = 0.90
+    chop_penalty: float = REGIME_PENALTY_CHOP
+    bear_buy_penalty: float = REGIME_PENALTY_BEAR_BUY
+    bull_sell_penalty: float = REGIME_PENALTY_BULL_SELL
 
     # Stability / anti-flip
     hysteresis_hold_bias: float = 0.03     # make HOLD "sticky" by requiring extra edge to flip
-    min_edge_to_flip: float = 0.06         # require at least this edge magnitude to flip direction
+    min_edge_to_flip: float = 0.12         # require at least this edge magnitude to flip direction (raised from 0.06)
     confirmations_to_flip: int = 2         # require N consecutive signals before switching BUY<->SELL
     max_confidence: float = 0.99
 
@@ -514,8 +540,12 @@ def apply_intraday_policy(
     cfg = _apply_env_overrides(cfg or PolicyConfig())
     rolling = rolling_override if isinstance(rolling_override, dict) else _read_rolling()
     if not rolling:
-        log("[policy_dt] ⚠️ rolling empty.")
+        log("[policy] ⚠️ rolling empty.")
         return {"symbols": 0, "updated": 0}
+    
+    # Count symbols for entry log
+    symbol_count = sum(1 for k in rolling.keys() if not str(k).startswith("_"))
+    log(f"[policy] 🧠 Computing policy: symbols={symbol_count}")
 
     # normalize max_positions
     try:
@@ -528,6 +558,19 @@ def apply_intraday_policy(
     global_regime = _get_global_regime(rolling)
     regime_label_raw = str(global_regime.get("label") or "unknown")
     regime_label = _regime_for_policy(regime_label_raw)
+    
+    # Log regime change if detected
+    try:
+        gdt = rolling.get("_GLOBAL_DT") if isinstance(rolling.get("_GLOBAL_DT"), dict) else {}
+        prev_regime = gdt.get("prev_regime_label")
+        if prev_regime and prev_regime != regime_label:
+            log(f"[policy] 🌍 Regime change: {prev_regime} → {regime_label}")
+        gdt["prev_regime_label"] = regime_label
+        rolling["_GLOBAL_DT"] = gdt
+    except Exception as e:
+        if get_aggregator:
+            get_aggregator().forward_log("ERROR", f"Error logging regime change: {e}", "policy_engine")
+        log(f"[policy] ⚠️ Error tracking regime change: {e}")
 
     # Phase 5: load playbook profile (soft gate knobs + strategy weights)
     dt_profile = {}
@@ -538,8 +581,11 @@ def apply_intraday_policy(
         gdt = rolling.get("_GLOBAL_DT") if isinstance(rolling.get("_GLOBAL_DT"), dict) else {}
         gdt["dt_playbook_profile"] = {"name": str(dt_profile.get("label") or ""), "ts": _utc_now_iso()}
         rolling["_GLOBAL_DT"] = gdt
-    except Exception:
+    except Exception as e:
         dt_profile = {}
+        if get_aggregator:
+            get_aggregator().forward_log("ERROR", f"Profile loading error: {e}", "policy_engine")
+        log(f"[policy] ⚠️ Error loading DT profile: {e}")
 
     # Choose which symbols to touch (lane-aware)
     lane_syms = _lane_symbols(rolling, symbols, max_symbols)
@@ -628,13 +674,17 @@ def apply_intraday_policy(
                 for k, v in prof_w.items():
                     try:
                         merged[str(k).upper()] = float(merged.get(str(k).upper(), 1.0)) * float(v)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        if get_aggregator:
+                            get_aggregator().forward_log("ERROR", f"Bot weight merge error: {e}", "policy_engine")
+                        log(f"[policy] ⚠️ Error merging bot weight {k}: {e}")
                 bot_weights = merged
             else:
                 bot_weights = {str(k).upper(): float(v) for k, v in prof_w.items()}
-    except Exception:
-        pass
+    except Exception as e:
+        if get_aggregator:
+            get_aggregator().forward_log("ERROR", f"Strategy weights error: {e}", "policy_engine")
+        log(f"[policy] ⚠️ Error applying strategy weights: {e}")
     universe = plan.get("universe") if isinstance(plan, dict) else None
     universe_set = {str(s).upper() for s in universe} if isinstance(universe, list) and universe else None
     allow_model_fallback = bool(plan.get("allow_model_fallback")) if isinstance(plan, dict) else False
@@ -698,8 +748,13 @@ def apply_intraday_policy(
                     allowed_bots=allowed_bots if isinstance(allowed_bots, list) else None,
                     bot_weights=bot_weights if isinstance(bot_weights, dict) else None,
                 )
-            except Exception:
+                if isinstance(setup, dict) and setup.get("bot"):
+                    log(f"[policy] 🎯 {sym}: strategy={setup.get('bot')}")
+            except Exception as e:
                 setup = None
+                if get_aggregator:
+                    get_aggregator().forward_log("ERROR", f"Strategy selection error on {sym}: {e}", "policy_engine")
+                log(f"[policy] ⚠️ Error selecting strategy for {sym}: {e}")
 
         # Maintain squeeze memory for Phase 3 (release detection).
         try:
@@ -709,8 +764,10 @@ def apply_intraday_policy(
             st["prev_squeeze_on"] = bool(sq_on)
             st["ts"] = _utc_now_iso()
             node["_squeeze_state"] = st
-        except Exception:
-            pass
+        except Exception as e:
+            if get_aggregator:
+                get_aggregator().forward_log("ERROR", f"Squeeze state error on {sym}: {e}", "policy_engine")
+            log(f"[policy] ⚠️ Error maintaining squeeze state for {sym}: {e}")
 
         if isinstance(setup, dict) and str(setup.get("side") or "").upper() in {"BUY", "SELL"}:
 
@@ -724,8 +781,10 @@ def apply_intraday_policy(
                     # tiny confidence nudge (bounded)
                     setup["confidence"] = max(0.0, min(1.0, float(setup.get("confidence") or 0.0) * (0.90 + 0.10 * float(w))))
                     setup["reason"] = f"{setup.get('reason') or ''} (w={w:.2f})".strip()
-            except Exception:
-                pass
+            except Exception as e:
+                if get_aggregator:
+                    get_aggregator().forward_log("ERROR", f"Strategy weight error on {sym}: {e}", "policy_engine")
+                log(f"[policy] ⚠️ Error applying strategy weights for {sym}: {e}")
             proposed_intent = str(setup.get("side") or "HOLD").upper()
             has_position = _has_position(node)
             if proposed_intent == "BUY" and has_position:
@@ -734,10 +793,16 @@ def apply_intraday_policy(
                 proposed_intent = "HOLD"
             base_conf = float(setup.get("confidence") or 0.0)
             edge = float(setup.get("score") or 0.0) / 100.0  # score -> pseudo-edge scale
+            
+            # Log raw signal score
+            log(f"[policy] ⚡ {sym}: raw_score={setup.get('score', 0.0):.3f}")
 
             trend, vol_bkt = _trend_and_vol(ctx)
 
             conf_adj, adj_detail = _adjust_conf(base_conf, proposed_intent, trend, vol_bkt, regime_label, cfg)
+            
+            # Log adjusted confidence
+            log(f"[policy] ⚡ {sym}: final_score={edge*100:.3f} (adjusted), conf={conf_adj:.2%}")
 
             stabilized_action, new_state, hyst_note = _stabilize_with_hysteresis(
                 node=node,
@@ -747,10 +812,21 @@ def apply_intraday_policy(
                 cfg=cfg,
                 policy_key=out_key,
             )
+            
+            # Log hysteresis state transition
+            prev_action_log = node.get(out_key, {}).get("action") if isinstance(node.get(out_key), dict) else "HOLD"
+            if prev_action_log != stabilized_action:
+                pending = new_state.get("pending_count", 0)
+                confirmations = cfg.confirmations_to_flip
+                log(f"[policy] 🔄 {sym}: hysteresis {prev_action_log} → {stabilized_action} (pending={pending}/{confirmations})")
 
             action = stabilized_action
             conf_final = float(conf_adj) if action in {"BUY", "SELL"} else 0.0
             trade_gate = bool(action in {"BUY", "SELL"} and conf_final >= cfg.min_confidence)
+            
+            # Log if trade gate is false due to confidence
+            if not trade_gate and action in {"BUY", "SELL"}:
+                log(f"[policy] 🚫 {sym}: gate=False (conf={conf_final:.2%} < min={cfg.min_confidence:.2%})")
 
             # Phase 8: news/event risk seatbelt
             risk_penalty = 1.0
@@ -767,8 +843,11 @@ def apply_intraday_policy(
                             action = "STAND_DOWN"
                         risk_penalty = float(risk.get("penalty") or 1.0)
                         risk_note = ",".join([str(x) for x in (risk.get("reasons") or [])][:3])
-            except Exception:
+            except Exception as e:
                 risk_penalty = 1.0
+                if get_aggregator:
+                    get_aggregator().forward_log("ERROR", f"Risk assessment error on {sym}: {e}", "policy_engine")
+                log(f"[policy] ⚠️ Error assessing risk for {sym}: {e}")
 
             # Phase 9: researcher rules
             try:
@@ -791,8 +870,10 @@ def apply_intraday_policy(
                         rolling[sym] = node
                         updated += 1
                         continue
-            except Exception:
-                pass
+            except Exception as e:
+                if get_aggregator:
+                    get_aggregator().forward_log("ERROR", f"Bot filter error on {sym}: {e}", "policy_engine")
+                log(f"[policy] ⚠️ Error checking bot_allowed for {sym}: {e}")
 
             # Phase 7: calibrated probability-of-hit
             p_hit = conf_final
@@ -801,8 +882,11 @@ def apply_intraday_policy(
                     ph = get_phit(bot=bot_name, regime_label=regime_label, base_conf=conf_final)
                     if ph is not None:
                         p_hit = float(ph)
-            except Exception:
+            except Exception as e:
                 p_hit = conf_final
+                if get_aggregator:
+                    get_aggregator().forward_log("ERROR", f"P(hit) calibration error on {sym}: {e}", "policy_engine")
+                log(f"[policy] ⚠️ Error getting p_hit for {sym}: {e}")
 
             # Apply risk penalty to BOTH confidence and p_hit (seatbelt, not steering wheel)
             # IMPORTANT: we keep a separate "signal" confidence even when action stabilizes to HOLD.
@@ -833,8 +917,11 @@ def apply_intraday_policy(
                     num = abs(float(tp) - float(last_px))
                     if denom > 1e-9:
                         expected_r = float(max(0.2, min(5.0, num / denom)))
-            except Exception:
+            except Exception as e:
                 expected_r = 1.0
+                if get_aggregator:
+                    get_aggregator().forward_log("ERROR", f"Expected R calculation error on {sym}: {e}", "policy_engine")
+                log(f"[policy] ⚠️ Error computing expected R for {sym}: {e}")
 
             # Phase 4: NO_TRADE / PROBE / ENTER / PRESS
             tier = "NO_TRADE"
@@ -869,8 +956,10 @@ def apply_intraday_policy(
                 if last_px > 0 and "atr_pct" not in feats:
                     feats = dict(feats)
                     feats["atr_pct"] = float(atr / last_px) if atr > 0 else 0.0
-            except Exception:
-                pass
+            except Exception as e:
+                if get_aggregator:
+                    get_aggregator().forward_log("ERROR", f"Feature derivation error on {sym}: {e}", "policy_engine")
+                log(f"[policy] ⚠️ Error deriving features for {sym}: {e}")
 
             node["execution_plan_dt"] = {
                 "bot": str(setup.get("bot") or "").upper(),
@@ -917,6 +1006,28 @@ def apply_intraday_policy(
                 "bot": node["execution_plan_dt"].get("bot"),
                 "_state": new_state,
             }
+            
+            # Log final policy decision for this symbol
+            log(f"[policy] 📊 {sym}: action={action} conf={conf_final:.2%} trade_gate={trade_gate}")
+            if not trade_gate and action in {"BUY", "SELL"}:
+                log(f"[policy] 🚫 {sym}: rejection_reason={reason[:100]}")
+            
+            # Log feature importance for this policy decision
+            try:
+                if get_feature_tracker is not None and isinstance(feats, dict) and feats:
+                    tracker = get_feature_tracker()
+                    tracker.log_prediction(
+                        symbol=sym,
+                        features_dict=feats,
+                        prediction=action,
+                        confidence=float(conf_final),
+                        metadata={"cycle": "policy", "bot": node["execution_plan_dt"].get("bot")}
+                    )
+            except Exception as e:
+                if get_aggregator:
+                    get_aggregator().forward_log("ERROR", f"Feature tracking error on {sym}: {e}", "policy_engine")
+                log(f"[policy] ⚠️ Error tracking features for {sym}: {e}")
+            
             rolling[sym] = node
             updated += 1
             continue
@@ -942,6 +1053,7 @@ def apply_intraday_policy(
         _, proba = _extract_prediction(node)
         if not proba:
             # still write a safe HOLD so downstream doesn't see stale data
+            log(f"[policy] ⚠️ {sym}: missing predictions_dt")
             node[out_key] = {
                 "action": "HOLD",
                 "intent": "HOLD",
@@ -960,6 +1072,9 @@ def apply_intraday_policy(
         p_buy = float(proba.get("BUY", 0.0))
         p_hold = float(proba.get("HOLD", 0.0))
         p_sell = float(proba.get("SELL", 0.0))
+        
+        # Log raw model probabilities
+        log(f"[policy] ⚡ {sym}: raw_probs p_buy={p_buy:.3f} p_sell={p_sell:.3f} p_hold={p_hold:.3f}")
 
         proposed_intent, base_conf, edge = _raw_intent_from_edge(p_buy, p_hold, p_sell, cfg)
         has_position = _has_position(node)
@@ -970,6 +1085,9 @@ def apply_intraday_policy(
         trend, vol_bkt = _trend_and_vol(ctx)
 
         conf_adj, adj_detail = _adjust_conf(base_conf, proposed_intent, trend, vol_bkt, regime_label, cfg)
+        
+        # Log adjusted score
+        log(f"[policy] ⚡ {sym}: edge={edge:.3f}, adjusted_conf={conf_adj:.2%}")
 
         r = regime_label.lower()
         if cfg.stand_down_in_crash and r in {"crash", "stress"}:
@@ -993,6 +1111,7 @@ def apply_intraday_policy(
 
             if proposed_intent in {"BUY", "SELL"} and conf_adj < cfg.min_confidence:
                 proposed_intent = "HOLD"
+                log(f"[policy] 🚫 {sym}: gate=False (conf={conf_adj:.2%} < min={cfg.min_confidence:.2%})")
 
             stabilized_action, new_state, hyst_note = _stabilize_with_hysteresis(
                 node=node,
@@ -1002,10 +1121,21 @@ def apply_intraday_policy(
                 cfg=cfg,
                 policy_key=out_key,
             )
+            
+            # Log hysteresis state transition
+            prev_action_log = node.get(out_key, {}).get("action") if isinstance(node.get(out_key), dict) else "HOLD"
+            if prev_action_log != stabilized_action:
+                pending = new_state.get("pending_count", 0)
+                confirmations = cfg.confirmations_to_flip
+                log(f"[policy] 🔄 {sym}: hysteresis {prev_action_log} → {stabilized_action} (pending={pending}/{confirmations})")
 
             action = stabilized_action
             conf_final = float(conf_adj) if action in {"BUY", "SELL"} else 0.0
             trade_gate = bool(action in {"BUY", "SELL"} and conf_final >= cfg.min_confidence)
+            
+            # Log if trade gate fails due to score threshold
+            if not trade_gate and action in {"BUY", "SELL"}:
+                log(f"[policy] 🚫 {sym}: gate=False (score={score:.3f}, threshold={cfg.buy_threshold if action=='BUY' else cfg.sell_threshold:.3f})")
 
             # Phase 7: calibrated probability-of-hit
             p_hit = conf_final
@@ -1014,8 +1144,11 @@ def apply_intraday_policy(
                     ph = get_phit(bot="MODEL", regime_label=regime_label, base_conf=conf_final)
                     if ph is not None:
                         p_hit = float(ph)
-            except Exception:
+            except Exception as e:
                 p_hit = conf_final
+                if get_aggregator:
+                    get_aggregator().forward_log("ERROR", f"P(hit) calibration error on {sym}: {e}", "policy_engine")
+                log(f"[policy] ⚠️ Error getting p_hit for {sym}: {e}")
 
             reason = (
                 f"edge={edge:.3f} p_buy={p_buy:.3f} p_sell={p_sell:.3f} p_hold={p_hold:.3f}; "
@@ -1034,6 +1167,28 @@ def apply_intraday_policy(
             "ts": _utc_now_iso(),
             "_state": new_state if isinstance(new_state, dict) else {},
         }
+        
+        # Log final policy decision for this symbol
+        log(f"[policy] 📊 {sym}: action={action} conf={conf_final:.2%} trade_gate={trade_gate}")
+        if not trade_gate and action in {"BUY", "SELL"}:
+            log(f"[policy] 🚫 {sym}: rejection_reason={reason[:100]}")
+        
+        # Log feature importance for model-based policy decision
+        try:
+            if get_feature_tracker is not None and isinstance(feats, dict) and feats:
+                tracker = get_feature_tracker()
+                tracker.log_prediction(
+                    symbol=sym,
+                    features_dict=feats,
+                    prediction=action,
+                    confidence=float(conf_final),
+                    metadata={"cycle": "policy", "model": "ensemble"}
+                )
+        except Exception as e:
+            if get_aggregator:
+                get_aggregator().forward_log("ERROR", f"Feature tracking error on {sym}: {e}", "policy_engine")
+            log(f"[policy] ⚠️ Error tracking features for {sym}: {e}")
+        
         rolling[sym] = node
         updated += 1
 
@@ -1094,15 +1249,29 @@ def apply_intraday_policy(
             if isinstance(heat_summary, dict):
                 gdt["heat_dt"] = heat_summary
             rolling["_GLOBAL_DT"] = gdt
-    except Exception:
+    except Exception as e:
         heat_summary = None
+        if get_aggregator:
+            get_aggregator().forward_log("ERROR", f"Portfolio heat management error: {e}", "policy_engine")
+        log(f"[policy] ⚠️ Error applying portfolio heat gates: {e}")
 
     if save:
         save_rolling(rolling)
+    
+    # Validate rolling structure before returning (PR #4)
+    try:
+        from dt_backend.core.schema_validator_dt import validate_rolling, ValidationError
+        validate_rolling(rolling)
+    except ValidationError as e:
+        log(f"[policy_dt] ❌ Schema validation failed: {e}")
+        # Log but don't raise - allow graceful degradation
+    except Exception as e:
+        log(f"[policy_dt] ⚠️ Validation error: {e}")
 
     extra = f", capped={capped}, max_positions={max_positions_n}" if max_positions_n is not None else ""
     lane_note = f", lane_symbols={len(lane_syms)}" if isinstance(lane_syms, list) else ""
     log(f"[policy_dt] ✅ updated policy_dt for {updated} symbols (regime={regime_label}){extra}{lane_note}.")
+    log(f"[policy] ✅ Policy computation complete: computed={updated}")
     return {
         "symbols": len(rolling),
         "updated": updated,
