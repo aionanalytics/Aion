@@ -119,7 +119,7 @@ def _acquire_lock(timeout_s: float = 30.0) -> bool:
                 if get_aggregator:
                     try:
                         agg = get_aggregator()
-                        agg.error(f"[pipeline] Lock timeout after {timeout_s}s (holder pid={pid})")
+                        agg.forward_log("ERROR", f"Lock timeout after {timeout_s}s (holder pid={pid})", "pipeline")
                     except Exception:
                         pass
                 return False
@@ -168,7 +168,7 @@ def _read_rolling() -> Dict[str, Any]:
         if get_aggregator:
             try:
                 agg = get_aggregator()
-                agg.error(f"[pipeline] Failed to read rolling cache {path}: {e}")
+                agg.forward_log("ERROR", f"Failed to read rolling cache {path}: {e}", "pipeline")
             except Exception:
                 pass
         return {}
@@ -203,7 +203,7 @@ def save_rolling(rolling: Dict[str, Any]) -> None:
         if get_aggregator:
             try:
                 agg = get_aggregator()
-                agg.error(f"[pipeline] Failed to save rolling cache {path}: {e}")
+                agg.forward_log("ERROR", f"Failed to save rolling cache {path}: {e}", "pipeline")
             except Exception:
                 pass
     finally:
@@ -227,7 +227,7 @@ def load_universe() -> List[str]:
         if get_aggregator:
             try:
                 agg = get_aggregator()
-                agg.error(f"[pipeline] Failed to parse universe file {path}: {e}")
+                agg.forward_log("ERROR", f"Failed to parse universe file {path}: {e}", "pipeline")
             except Exception:
                 pass
         return []
@@ -241,7 +241,7 @@ def load_universe() -> List[str]:
         if get_aggregator:
             try:
                 agg = get_aggregator()
-                agg.error(f"[pipeline] Unexpected universe schema in {path}")
+                agg.forward_log("ERROR", f"Unexpected universe schema in {path}", "pipeline")
             except Exception:
                 pass
         return []
