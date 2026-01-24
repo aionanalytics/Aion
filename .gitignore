@@ -14,6 +14,11 @@ frontend/dist/
 frontend/out/
 frontend/package-lock.json
 
+# ✅ ALLOW frontend code to push (remove if blocking)
+! frontend/app/
+!frontend/components/
+!frontend/lib/
+
 # Zips / archives
 *.zip
 
