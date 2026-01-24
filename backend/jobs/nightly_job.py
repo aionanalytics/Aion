@@ -193,7 +193,8 @@ PIPELINE: List[Tuple[str, str]] = [
     ("social", "Social sentiment"),
     ("news_intel", "News brain + intel (cache-driven)"),
     ("dataset", "ML dataset build (regression)"),
-    ("training", "Model training (regression)"),
+    ("training_sector", "Sector training (model training per sector)"),
+    ("training_global", "Global training (model training across universe)"),
     ("predictions", "Regression predictions → Rolling"),
     ("prediction_logger", "Prediction logging (UI feed)"),
     ("accuracy_engine", "Accuracy engine (calibration + windows)"),
@@ -509,52 +510,80 @@ def run_nightly_job(
         except Exception as e:
             _record_err(summary, key, e, t0)
 
-        # 9) Training
-        key, title = PIPELINE[8]
-        _phase(title, 9, TOTAL_PHASES)
-        t0 = time.time()
+        # 9A) Sector Training
+        key_sector, title_sector = PIPELINE[8]
+        _phase(title_sector, 9, TOTAL_PHASES)
+        t0_sector = time.time()
         try:
-            _require(train_all_models, "backend.core.ai_model.train_all_models")
+            _require(train_all_sector_models, "backend.core.sector_training.sector_trainer.train_all_sector_models")
+            max_workers = max(1, int(os.getenv("AION_SECTOR_TRAIN_WORKERS", "1") or "1"))
+            log(f"[nightly_job] 🧭 Sector training starting — workers={max_workers} (set AION_SECTOR_TRAIN_WORKERS to override)")
+            
             today = datetime.now(TIMEZONE)
             use_optuna = (today.weekday() == 0)  # Monday tuning
             if mode == "replay":
                 use_optuna = False
-            # Use n_trials=100 for proper Optuna hyperparameter optimization
-            # This ensures models train with meaningful tuning (3-5 min per horizon)
-            # enabling feature importance extraction and better model quality
             n_trials = 100 if use_optuna else 0
+            
+            sector_res = (train_all_sector_models(
+                dataset_name="training_data_daily.parquet",
+                use_optuna=use_optuna,
+                n_trials=n_trials,
+                max_workers=max_workers,
+            ) or {})
+            
+            if not isinstance(sector_res, dict):
+                sector_res = {"status": "error", "error": "unexpected_result"}
+            
+            _record_ok(summary, key_sector, sector_res, t0_sector)
+            _write_summary(summary)
+            
+            sector_time = time.time() - t0_sector
+            log(f"✅ Sector training complete — {sector_time:.1f}s")
+            
+        except Exception as e:
+            _record_err(summary, key_sector, e, t0_sector)
+            _write_summary(summary)
+            log(f"[nightly_job] ⚠️ Sector training failed (continuing with global): {e}")
 
-            sector_res = {}
-            try:
-                max_workers = max(1, int(os.getenv("AION_SECTOR_TRAIN_WORKERS", "1") or "1"))
-                log(f"[nightly_job] 🧠 Sector training workers={max_workers} (set AION_SECTOR_TRAIN_WORKERS to override)")
-                sector_res = (train_all_sector_models(
-                    dataset_name="training_data_daily.parquet",
-                    use_optuna=use_optuna,
-                    n_trials=n_trials,
-                    max_workers=max_workers,
-                ) or {})
-            except Exception as e:
-                log(f"[nightly_job] ⚠️ sector training failed (continuing with global): {e}")
-                sector_res = {"status": "error", "error": str(e)}
-
+        # 9B) Global Training
+        key_global, title_global = PIPELINE[9]
+        _phase(title_global, 10, TOTAL_PHASES)
+        t0_global = time.time()
+        try:
+            _require(train_all_models, "backend.core.ai_model.core_training.train_all_models")
+            
+            today = datetime.now(TIMEZONE)
+            use_optuna = (today.weekday() == 0)  # Monday tuning
+            if mode == "replay":
+                use_optuna = False
+            n_trials = 100 if use_optuna else 0
+            
+            log(f"[nightly_job] 🌍 Global training starting — optuna={use_optuna} n_trials={n_trials}")
+            
             res = train_all_models(
                 dataset_name="training_data_daily.parquet",
                 use_optuna=use_optuna,
                 n_trials=n_trials,
-                as_of_date=as_of_date,  # Pass through for point-in-time filtering
+                as_of_date=as_of_date,
             )
             _fail_loud_training_check(res)
-            summary["sector_training"] = sector_res
-            _record_ok(summary, key, res, t0)
-            log(f"✅ Training complete (optuna={use_optuna}).")
+            
+            _record_ok(summary, key_global, res, t0_global)
+            _write_summary(summary)
+            
+            global_time = time.time() - t0_global
+            log(f"✅ Global training complete — {global_time:.1f}s")
+            
         except Exception as e:
-            _record_err(summary, key, e, t0)
+            _record_err(summary, key_global, e, t0_global)
+            _write_summary(summary)
+            raise
 
         
         # 10) Predictions
-        key, title = PIPELINE[9]
-        _phase(title, 10, TOTAL_PHASES)
+        key, title = PIPELINE[10]
+        _phase(title, 11, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(predict_all, "backend.core.ai_model.core_training.predict_all")
@@ -636,8 +665,8 @@ def run_nightly_job(
             raise
 
         # 11) Prediction logger (UI feed + ledger)
-        key, title = PIPELINE[10]
-        _phase(title, 11, TOTAL_PHASES)
+        key, title = PIPELINE[11]
+        _phase(title, 12, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(log_predictions, "backend.services.prediction_logger.log_predictions")
@@ -659,8 +688,8 @@ def run_nightly_job(
             _write_summary(summary)
 
         # 12) Accuracy engine (calibration + windows)
-        key, title = PIPELINE[11]
-        _phase(title, 12, TOTAL_PHASES)
+        key, title = PIPELINE[12]
+        _phase(title, 13, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(compute_accuracy, "backend.services.accuracy_engine.compute_accuracy")
@@ -673,8 +702,8 @@ def run_nightly_job(
             _write_summary(summary)
 
         # 13) Context state
-        key, title = PIPELINE[12]
-        _phase(title, 13, TOTAL_PHASES)
+        key, title = PIPELINE[13]
+        _phase(title, 14, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(build_context, "backend.core.context_state.build_context")
@@ -687,8 +716,8 @@ def run_nightly_job(
             _write_summary(summary)
 
         # 14) Regime detection
-        key, title = PIPELINE[13]
-        _phase(title, 14, TOTAL_PHASES)
+        key, title = PIPELINE[14]
+        _phase(title, 15, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(detect_regime, "backend.core.regime_detector.detect_regime")
@@ -701,8 +730,8 @@ def run_nightly_job(
             _write_summary(summary)
 
         # 15) Continuous learning (drift + memory)
-        key, title = PIPELINE[14]
-        _phase(title, 15, TOTAL_PHASES)
+        key, title = PIPELINE[15]
+        _phase(title, 16, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(run_continuous_learning, "backend.core.continuous_learning.run_continuous_learning")
@@ -715,8 +744,8 @@ def run_nightly_job(
             _write_summary(summary)
 
         # 16) Performance aggregation (system metrics)
-        key, title = PIPELINE[15]
-        _phase(title, 16, TOTAL_PHASES)
+        key, title = PIPELINE[16]
+        _phase(title, 17, TOTAL_PHASES)
         t0 = time.time()
         try:
             if aggregate_system_performance is None:
@@ -731,8 +760,8 @@ def run_nightly_job(
             _write_summary(summary)
 
         # 17) AION brain update (behavioral memory)
-        key, title = PIPELINE[16]
-        _phase(title, 17, TOTAL_PHASES)
+        key, title = PIPELINE[17]
+        _phase(title, 18, TOTAL_PHASES)
         t0 = time.time()
         try:
             if update_aion_brain is None:
@@ -747,8 +776,8 @@ def run_nightly_job(
             _write_summary(summary)
 
         # 18) Policy engine (brain-aligned)
-        key, title = PIPELINE[17]
-        _phase(title, 18, TOTAL_PHASES)
+        key, title = PIPELINE[18]
+        _phase(title, 19, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(apply_policy, "backend.core.policy_engine.apply_policy")
@@ -761,8 +790,8 @@ def run_nightly_job(
             _write_summary(summary)
 
         # 19) Swing Bot EOD Rebalance (after policy)
-        key, title = PIPELINE[18]
-        _phase(title, 19, TOTAL_PHASES)
+        key, title = PIPELINE[19]
+        _phase(title, 20, TOTAL_PHASES)
         t0 = time.time()
         try:
             bots = ["1w", "2w", "4w"]
@@ -817,8 +846,8 @@ def run_nightly_job(
             log(f"[nightly_job] ⚠️ post-policy UI refresh failed (continuing): {e_refresh}")
 
         # 20) Insights builder
-        key, title = PIPELINE[19]
-        _phase(title, 20, TOTAL_PHASES)
+        key, title = PIPELINE[20]
+        _phase(title, 21, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(build_daily_insights, "backend.services.insights_builder.build_daily_insights")
@@ -831,8 +860,8 @@ def run_nightly_job(
             _write_summary(summary)
 
         # 21) Supervisor agent
-        key, title = PIPELINE[20]
-        _phase(title, 21, TOTAL_PHASES)
+        key, title = PIPELINE[21]
+        _phase(title, 22, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(run_supervisor_agent, "backend.core.supervisor_agent.run_supervisor_agent")
