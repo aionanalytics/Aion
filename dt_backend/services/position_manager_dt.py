@@ -700,3 +700,93 @@ def process_exits(
 
     write_positions_state(state)
     return out
+
+
+def calculate_pnl_attribution(
+    positions_state: Dict[str, Any],
+    current_prices: Dict[str, float],
+) -> Dict[str, Any]:
+    """Calculate P&L attribution by bot/strategy.
+    
+    This function attributes unrealized P&L to different trading strategies
+    based on open positions. It's used for ML features and performance tracking.
+    
+    Args:
+        positions_state: Dict of symbol -> position state (from read_positions_state())
+        current_prices: Dict of symbol -> current price
+    
+    Returns:
+        Dict with structure:
+        {
+            "ORB": {"pnl": 500.0, "position_count": 2, "total_qty": 150.0},
+            "VWAP": {"pnl": -250.0, "position_count": 1, "total_qty": 50.0},
+            "_total": {"pnl": 250.0, "position_count": 3, "total_qty": 200.0}
+        }
+    """
+    attribution: Dict[str, Dict[str, float]] = {}
+    total_pnl = 0.0
+    total_positions = 0
+    total_qty = 0.0
+    
+    if not isinstance(positions_state, dict):
+        return {
+            "_total": {
+                "pnl": 0.0,
+                "position_count": 0,
+                "total_qty": 0.0,
+            }
+        }
+    
+    for symbol, pos in positions_state.items():
+        if not isinstance(pos, dict):
+            continue
+        
+        # Only count OPEN positions
+        status = str(pos.get("status", "")).upper()
+        if status != "OPEN":
+            continue
+        
+        # Extract position details
+        side = str(pos.get("side", "BUY")).upper()
+        qty = _safe_float(pos.get("qty"), 0.0)
+        entry_price = _safe_float(pos.get("entry_price"), 0.0)
+        bot = str(pos.get("bot") or "UNKNOWN").upper()
+        
+        # Get current price
+        current_price = _safe_float(current_prices.get(str(symbol).upper()), 0.0)
+        
+        # Skip if missing data
+        if qty <= 0 or entry_price <= 0 or current_price <= 0:
+            continue
+        
+        # Calculate P&L
+        if side == "BUY":
+            pnl = (current_price - entry_price) * qty
+        else:  # SELL (short position)
+            pnl = (entry_price - current_price) * qty
+        
+        # Add to bot attribution
+        if bot not in attribution:
+            attribution[bot] = {
+                "pnl": 0.0,
+                "position_count": 0,
+                "total_qty": 0.0,
+            }
+        
+        attribution[bot]["pnl"] += pnl
+        attribution[bot]["position_count"] += 1
+        attribution[bot]["total_qty"] += qty
+        
+        # Update totals
+        total_pnl += pnl
+        total_positions += 1
+        total_qty += qty
+    
+    # Add total
+    attribution["_total"] = {
+        "pnl": total_pnl,
+        "position_count": total_positions,
+        "total_qty": total_qty,
+    }
+    
+    return attribution

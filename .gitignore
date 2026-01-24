@@ -41,3 +41,8 @@ tools/
 dt_backend/signals/
 dt_backend/models/
 *.tsbuildinfo
+
+# Coverage reports
+.coverage
+.coverage.*
+htmlcov/

@@ -38,6 +38,22 @@ from typing import Any, Dict, List, Tuple, Optional
 
 from dt_backend.tuning.dt_profile_loader import load_dt_profile, strategy_weight
 from .data_pipeline_dt import _read_rolling, save_rolling, ensure_symbol_node, log
+from dt_backend.core.constants_dt import (
+    CONFIDENCE_MIN,
+    CONFIDENCE_MAX,
+    EDGE_MIN_TO_FLIP,
+    EDGE_HOLD_BIAS,
+    CONFIRMATIONS_TO_FLIP,
+    VOL_PENALTY_HIGH,
+    VOL_PENALTY_MEDIUM,
+    TREND_BOOST_STRONG,
+    TREND_BOOST_MILD,
+    REGIME_PENALTY_CHOP,
+    REGIME_PENALTY_BEAR_BUY,
+    REGIME_PENALTY_BULL_SELL,
+    BUY_THRESHOLD,
+    SELL_THRESHOLD,
+)
 
 # --- OPTIONAL IMPORTS (UNCHANGED) ---
 try:
@@ -75,6 +91,11 @@ try:
 except Exception:
     select_best_setup = None  # type: ignore
 
+try:
+    from dt_backend.ml.feature_importance_tracker import get_tracker as get_feature_tracker
+except Exception:
+    get_feature_tracker = None  # type: ignore
+
 
 # ============================================================
 # 🔐 POSITION DETECTION (NEW, SAFE, BACKWARD-COMPATIBLE)
@@ -96,28 +117,28 @@ def _has_position(node: Dict[str, Any]) -> bool:
 @dataclass
 class PolicyConfig:
     # Signal edge thresholds (p_buy - p_sell)
-    buy_threshold: float = 0.12
-    sell_threshold: float = -0.12
+    buy_threshold: float = BUY_THRESHOLD
+    sell_threshold: float = SELL_THRESHOLD
 
     # Minimum confidence for acting (after adjustments)
-    min_confidence: float = 0.30
+    min_confidence: float = CONFIDENCE_MIN
 
     # Volatility penalties
-    vol_penalty_high: float = 0.65
-    vol_penalty_medium: float = 0.85
+    vol_penalty_high: float = VOL_PENALTY_HIGH
+    vol_penalty_medium: float = VOL_PENALTY_MEDIUM
 
     # Trend boosts when aligned
-    trend_boost_strong: float = 1.25
-    trend_boost_mild: float = 1.10
+    trend_boost_strong: float = TREND_BOOST_STRONG
+    trend_boost_mild: float = TREND_BOOST_MILD
 
     # Regime effects
-    chop_penalty: float = 0.90
-    bear_buy_penalty: float = 0.85
-    bull_sell_penalty: float = 0.90
+    chop_penalty: float = REGIME_PENALTY_CHOP
+    bear_buy_penalty: float = REGIME_PENALTY_BEAR_BUY
+    bull_sell_penalty: float = REGIME_PENALTY_BULL_SELL
 
     # Stability / anti-flip
     hysteresis_hold_bias: float = 0.03     # make HOLD "sticky" by requiring extra edge to flip
-    min_edge_to_flip: float = 0.06         # require at least this edge magnitude to flip direction
+    min_edge_to_flip: float = 0.12         # require at least this edge magnitude to flip direction (raised from 0.06)
     confirmations_to_flip: int = 2         # require N consecutive signals before switching BUY<->SELL
     max_confidence: float = 0.99
 
@@ -917,6 +938,21 @@ def apply_intraday_policy(
                 "bot": node["execution_plan_dt"].get("bot"),
                 "_state": new_state,
             }
+            
+            # Log feature importance for this policy decision
+            try:
+                if get_feature_tracker is not None and isinstance(feats, dict) and feats:
+                    tracker = get_feature_tracker()
+                    tracker.log_prediction(
+                        symbol=sym,
+                        features_dict=feats,
+                        prediction=action,
+                        confidence=float(conf_final),
+                        metadata={"cycle": "policy", "bot": node["execution_plan_dt"].get("bot")}
+                    )
+            except Exception:
+                pass
+            
             rolling[sym] = node
             updated += 1
             continue
@@ -1034,6 +1070,21 @@ def apply_intraday_policy(
             "ts": _utc_now_iso(),
             "_state": new_state if isinstance(new_state, dict) else {},
         }
+        
+        # Log feature importance for model-based policy decision
+        try:
+            if get_feature_tracker is not None and isinstance(feats, dict) and feats:
+                tracker = get_feature_tracker()
+                tracker.log_prediction(
+                    symbol=sym,
+                    features_dict=feats,
+                    prediction=action,
+                    confidence=float(conf_final),
+                    metadata={"cycle": "policy", "model": "ensemble"}
+                )
+        except Exception:
+            pass
+        
         rolling[sym] = node
         updated += 1
 
@@ -1099,6 +1150,16 @@ def apply_intraday_policy(
 
     if save:
         save_rolling(rolling)
+    
+    # Validate rolling structure before returning (PR #4)
+    try:
+        from dt_backend.core.schema_validator_dt import validate_rolling, ValidationError
+        validate_rolling(rolling)
+    except ValidationError as e:
+        log(f"[policy_dt] ❌ Schema validation failed: {e}")
+        # Log but don't raise - allow graceful degradation
+    except Exception as e:
+        log(f"[policy_dt] ⚠️ Validation error: {e}")
 
     extra = f", capped={capped}, max_positions={max_positions_n}" if max_positions_n is not None else ""
     lane_note = f", lane_symbols={len(lane_syms)}" if isinstance(lane_syms, list) else ""
