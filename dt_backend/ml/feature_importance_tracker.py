@@ -34,7 +34,22 @@ except Exception:
 
 
 class FeatureImportanceTracker:
-    """Track which features drive trading decisions."""
+    """Track which features drive trading decisions.
+    
+    Attributes:
+        ml_data_dir: Directory for storing feature importance data
+        importance_log_path: Path to JSONL log file
+        stats_path: Path to summary statistics JSON
+        drift_alerts_path: Path to drift detection alerts JSON
+        _recent_importances: Cache of recent importance entries (max 100)
+        _baseline_importance: Historical baseline feature importance scores.
+            Established from the stats file on initialization. Used as
+            reference for drift detection. If None, no baseline exists yet
+            and drift detection will return False.
+    """
+    
+    # Configuration constants
+    MAX_CACHE_SIZE = 100  # Maximum number of recent entries to keep in memory
     
     def __init__(self, ml_data_dir: Optional[Path] = None):
         """Initialize feature importance tracker.
@@ -129,9 +144,9 @@ class FeatureImportanceTracker:
             "timestamp": log_entry["timestamp"]
         })
         
-        # Keep only recent history (last 100 entries)
-        if len(self._recent_importances) > 100:
-            self._recent_importances = self._recent_importances[-100:]
+        # Keep only recent history (using class constant)
+        if len(self._recent_importances) > self.MAX_CACHE_SIZE:
+            self._recent_importances = self._recent_importances[-self.MAX_CACHE_SIZE:]
     
     def get_top_features(
         self,
