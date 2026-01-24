@@ -249,9 +249,6 @@ def schedule_model_retraining():
     # This would trigger the retraining pipeline
     # For now, just log the intent
     pass
-    except Exception as e:
-        log(f"[continuous_learning_dt] ⚠️ Error: {e}")
-        return {"status": "error", "error": str(e)}
 
 
 def run_incremental_learning_dt():
