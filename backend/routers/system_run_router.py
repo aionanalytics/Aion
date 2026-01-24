@@ -181,6 +181,43 @@ def _task_verify() -> Dict[str, Any]:
     }
 
 
+def _task_dashboard() -> Dict[str, Any]:
+    """Compute and cache dashboard metrics."""
+    try:
+        from backend.services.unified_cache_service import UnifiedCacheService
+        
+        # Update the unified cache which aggregates all dashboard data
+        cache_service = UnifiedCacheService()
+        if cache_service is None:
+            log("[system_run] ❌ Failed to initialize UnifiedCacheService")
+            return {
+                "status": "error",
+                "error": "Failed to initialize cache service",
+            }
+        
+        result = cache_service.update_all()
+        
+        if result is None:
+            log("[system_run] ❌ Cache update returned None")
+            return {
+                "status": "error",
+                "error": "Cache update failed",
+            }
+        
+        return {
+            "status": "ok",
+            "timestamp": result.get("timestamp"),
+            "sections_updated": list(result.get("data", {}).keys()),
+            "errors": result.get("errors", {}),
+        }
+    except Exception as e:
+        log(f"[system_run] ❌ Dashboard task error: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+        }
+
+
 TASKS: Dict[str, Callable[[], Any]] = {
     "nightly": _task_nightly,
     "train": _task_train,
@@ -189,7 +226,7 @@ TASKS: Dict[str, Callable[[], Any]] = {
     "fundamentals": _task_fundamentals,
     "news": _task_news,
     "verify": _task_verify,
-    # dashboard intentionally not wired (yet)
+    "dashboard": _task_dashboard,  # Now implemented
 }
 
 
@@ -201,16 +238,13 @@ HEAVY_TASKS = {"nightly", "train", "insights", "metrics", "fundamentals", "news"
 def run_task(task: str):
     task_key = (task or "").strip().lower()
 
-    if task_key == "dashboard":
-        raise HTTPException(status_code=501, detail="Dashboard rebuild not implemented yet.")
-
     fn = TASKS.get(task_key)
     if not fn:
         raise HTTPException(
             status_code=404,
             detail={
                 "error": f"Unknown task '{task_key}'",
-                "allowed": sorted(TASKS.keys()) + ["dashboard"],
+                "allowed": sorted(TASKS.keys()),
             },
         )
 
@@ -227,6 +261,6 @@ def run_task(task: str):
             "scheduler_response": payload,
         }
 
-    # Otherwise run locally (scheduler owner, or lightweight verify).
+    # Otherwise run locally (scheduler owner, or lightweight verify/dashboard).
     _run_bg(fn, task_key)
     return {"status": "started", "task": task_key, "scheduler_enabled": _scheduler_enabled()}
