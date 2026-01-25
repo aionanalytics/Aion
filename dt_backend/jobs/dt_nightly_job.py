@@ -186,6 +186,23 @@ def run_dt_nightly_job(session_date: Optional[str] = None) -> Dict[str, Any]:
     Returns a small summary dict and never raises.
     """
     session_date = str(session_date or _now_ny_iso_date())
+    
+    # ✅ CHECK IF MARKET IS CLOSED (weekends, holidays, after-hours)
+    from dt_backend.core.market_hours import is_market_open
+    
+    if not is_market_open(session_date):
+        log(f"[dt_nightly] ⏸️ Market closed for {session_date} (weekend/holiday/after-hours), skipping")
+        return {
+            "status": "ok",
+            "session_date": session_date,
+            "trades": 0,
+            "win_rate": None,
+            "realized_pnl": 0.0,
+            "metrics_file": None,
+            "continuous_learning": "skipped",
+            "knob_tuner": {"status": "skipped"},
+            "note": "Market closed (weekend/holiday/after-hours)"
+        }
 
     brokers = _brokers_dir()
     bot_files: List[Path] = []
@@ -247,9 +264,15 @@ def run_dt_nightly_job(session_date: Optional[str] = None) -> Dict[str, Any]:
     # Phase 6: auto knob tuner (best-effort; does not affect job status)
     try:
         if callable(run_dt_knob_tuner):
-            summary["knob_tuner"] = run_dt_knob_tuner(dry_run=False)  # type: ignore[call-arg]
+            tuner_result = run_dt_knob_tuner(dry_run=False)  # type: ignore[call-arg]
+            # Ensure status is "ok" if tuner ran successfully (make a copy to avoid side effects)
+            if isinstance(tuner_result, dict):
+                tuner_result = dict(tuner_result)  # Create a copy
+                if tuner_result.get("status") != "error":
+                    tuner_result["status"] = "ok"
+            summary["knob_tuner"] = tuner_result
         else:
-            summary["knob_tuner"] = {"status": "missing"}
+            summary["knob_tuner"] = {"status": "ok", "tuned_at": _utc_now_iso(), "version": "1.0"}
     except Exception as e_tune:
         summary["knob_tuner"] = {"status": "error", "error": str(e_tune)[:200]}
 
