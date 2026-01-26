@@ -20,7 +20,7 @@ import json
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from fastapi import APIRouter, HTTPException
 
@@ -73,7 +73,7 @@ def _error_response(error: str, details: Optional[str] = None) -> Dict[str, Any]
     }
 
 
-def _extract_signals_from_predictions(predictions: list, max_signals: int = 20) -> list:
+def _extract_signals_from_predictions(predictions: List[Dict[str, Any]], max_signals: int = 20) -> List[Dict[str, Any]]:
     """
     Extract trading signals from predictions.
     
@@ -95,7 +95,7 @@ def _extract_signals_from_predictions(predictions: list, max_signals: int = 20) 
     ]
 
 
-def _populate_result_with_predictions(result: Dict[str, Any], predictions: list) -> None:
+def _populate_result_with_predictions(result: Dict[str, Any], predictions: List[Dict[str, Any]]) -> None:
     """
     Populate result dict with predictions and signals.
     
