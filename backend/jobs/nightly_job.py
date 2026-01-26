@@ -894,7 +894,7 @@ def run_nightly_job(
             _record_err(summary, key, e, t0)
             _write_summary(summary)
 
-        # 22) Phase 6: auto knob tuner (best-effort; does not affect pipeline status)
+        # Optional: auto knob tuner (best-effort; does not affect pipeline status)
         t0 = time.time()
         try:
             if run_swing_knob_tuner is None:
@@ -916,7 +916,7 @@ def run_nightly_job(
             }
             _write_summary(summary)
 
-        # 23) EOD Snapshot capture (only in live mode, not replay)
+        # Optional: EOD Snapshot capture (only in live mode, not replay)
         if mode != "replay":
             t0 = time.time()
             try:
