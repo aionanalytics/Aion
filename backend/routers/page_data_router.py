@@ -29,6 +29,8 @@ try:
 except ImportError:
     from backend.config import PATHS, TIMEZONE  # type: ignore
 
+from utils.logger import log
+
 router = APIRouter(prefix="/api/page", tags=["page-data"])
 
 
@@ -278,50 +280,155 @@ async def get_predict_page_data() -> Dict[str, Any]:
             "signals": [...],
             "timestamp": "ISO timestamp"
         }
+    
+    Tries multiple sources in order:
+    1. rolling_optimized.json.gz (pre-optimized)
+    2. latest_predictions.json (nightly logs)
+    3. rolling.json.gz (raw data fallback)
     """
+    result = {
+        "predictions_by_horizon": {
+            "1d": [],
+            "1w": [],
+            "1m": [],
+        },
+        "signals": [],
+        "timestamp": datetime.now(TIMEZONE).isoformat(),
+    }
+    
+    # Try 1: rolling_optimized.json.gz (fastest, pre-optimized for frontend)
     try:
-        result = {
-            "predictions_by_horizon": {
-                "1d": [],
-                "1w": [],
-                "1m": [],
-            },
-            "signals": [],
-            "timestamp": datetime.now(TIMEZONE).isoformat(),
-        }
-        
-        # Load optimized predictions
         da_brains = Path(PATHS.get("da_brains", "da_brains"))
         rolling_opt = da_brains / "rolling_optimized.json.gz"
         
         if rolling_opt.exists():
             opt_data = _load_gz_json(rolling_opt)
-            if opt_data:
+            if opt_data and isinstance(opt_data, dict):
                 predictions = opt_data.get("predictions", [])
+                if isinstance(predictions, list) and predictions:
+                    result["predictions_by_horizon"]["1d"] = predictions[:100]
+                    result["predictions_by_horizon"]["1w"] = predictions[:50]
+                    result["predictions_by_horizon"]["1m"] = predictions[:30]
+                    
+                    # Extract signals
+                    result["signals"] = [
+                        {
+                            "symbol": p.get("symbol"),
+                            "action": "BUY" if p.get("prediction", 0) > 0 else "SELL",
+                            "confidence": p.get("confidence", 0),
+                            "price": p.get("last_price", 0),
+                        }
+                        for p in predictions[:20]
+                    ]
+                    
+                    return result
+    except Exception as e:
+        log(f"[page_data] Warning: rolling_optimized failed: {e}")
+    
+    # Try 2: latest_predictions.json (from nightly logs, UI-ready format)
+    try:
+        log_dir = Path(PATHS.get("logs", "logs")) / "nightly" / "predictions"
+        latest_pred = log_dir / "latest_predictions.json"
+        
+        if latest_pred.exists():
+            pred_data = _load_json(latest_pred)
+            if pred_data and isinstance(pred_data, dict):
+                symbols = pred_data.get("symbols", {})
+                if isinstance(symbols, dict) and symbols:
+                    predictions = []
+                    
+                    for sym, node in symbols.items():
+                        if isinstance(node, dict):
+                            preds = node.get("predictions", {})
+                            if isinstance(preds, dict):
+                                h1w = preds.get("1w", {})
+                                confidence = h1w.get("confidence", 0)
+                                
+                                # Only include if has valid confidence
+                                if confidence > 0:
+                                    predictions.append({
+                                        "symbol": sym,
+                                        "confidence": confidence,
+                                        "prediction": h1w.get("predicted_return", 0),
+                                        "last_price": node.get("price"),
+                                        "name": node.get("name"),
+                                        "sector": node.get("sector"),
+                                    })
+                    
+                    if predictions:
+                        # Sort by confidence descending
+                        predictions.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+                        
+                        result["predictions_by_horizon"]["1d"] = predictions[:100]
+                        result["predictions_by_horizon"]["1w"] = predictions[:50]
+                        result["predictions_by_horizon"]["1m"] = predictions[:30]
+                        
+                        # Extract signals
+                        result["signals"] = [
+                            {
+                                "symbol": p.get("symbol"),
+                                "action": "BUY" if p.get("prediction", 0) > 0 else "SELL",
+                                "confidence": p.get("confidence", 0),
+                                "price": p.get("last_price", 0),
+                            }
+                            for p in predictions[:20]
+                        ]
+                        
+                        return result
+    except Exception as e:
+        log(f"[page_data] Warning: latest_predictions.json failed: {e}")
+    
+    # Try 3: rolling.json.gz directly (raw data fallback)
+    try:
+        from backend.core.data_pipeline import _read_rolling
+        
+        rolling = _read_rolling()
+        if rolling and isinstance(rolling, dict):
+            predictions = []
+            
+            for sym, node in rolling.items():
+                if not str(sym).startswith("_") and isinstance(node, dict):
+                    preds = node.get("predictions", {})
+                    if isinstance(preds, dict):
+                        h1w = preds.get("1w", {})
+                        confidence = h1w.get("confidence", 0)
+                        
+                        # Only include if has valid confidence and price
+                        if confidence > 0 and node.get("price"):
+                            predictions.append({
+                                "symbol": sym,
+                                "confidence": confidence,
+                                "prediction": h1w.get("predicted_return", 0),
+                                "last_price": node.get("price"),
+                                "name": node.get("name"),
+                                "sector": node.get("sector"),
+                            })
+            
+            if predictions:
+                # Sort by confidence descending
+                predictions.sort(key=lambda x: x.get("confidence", 0), reverse=True)
                 
-                # For now, show all in 1d (can add horizon filtering later)
                 result["predictions_by_horizon"]["1d"] = predictions[:100]
                 result["predictions_by_horizon"]["1w"] = predictions[:50]
                 result["predictions_by_horizon"]["1m"] = predictions[:30]
                 
-                # Extract top signals
+                # Extract signals
                 result["signals"] = [
                     {
-                        "symbol": p["symbol"],
+                        "symbol": p.get("symbol"),
                         "action": "BUY" if p.get("prediction", 0) > 0 else "SELL",
                         "confidence": p.get("confidence", 0),
                         "price": p.get("last_price", 0),
                     }
                     for p in predictions[:20]
                 ]
-        
-        return result
-        
+                
+                return result
     except Exception as e:
-        return _error_response(
-            f"Failed to load predict page data: {type(e).__name__}",
-            str(e)
-        )
+        log(f"[page_data] Warning: rolling.json.gz fallback failed: {e}")
+    
+    # Return empty result if all sources fail (graceful degradation)
+    return result
 
 
 # -------------------------
