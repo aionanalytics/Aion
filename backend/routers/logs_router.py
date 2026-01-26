@@ -3,7 +3,7 @@
 Consolidated Logs Router — AION Analytics
 
 Consolidates log-related endpoints from:
-  - nightly_logs_router.py
+  - nightly_logs_router.py (deleted)
   - intraday_logs_router.py (log endpoints only)
 
 Endpoints:
