@@ -3,10 +3,10 @@
 Consolidated System Router — AION Analytics
 
 Consolidates system-related endpoints from:
-  - system_status_router.py
-  - health_router.py
-  - system_run_router.py
-  - diagnostics_router.py
+  - system_status_router.py (deleted)
+  - health_router.py (deleted)
+  - system_run_router.py (deleted)
+  - diagnostics_router.py (deleted)
 
 Endpoints:
   - GET  /api/system/status       (job monitor + supervisor verdict)

@@ -6,7 +6,7 @@ This module documents all active routers in the backend service.
 It serves as the single source of truth for the API structure.
 
 Last Updated: 2026-01-26
-Version: 2.0.0 (Router Consolidation)
+Version: 2.1.0 (Router Consolidation - Cleanup Complete)
 """
 
 from typing import Dict, List, Any
@@ -21,10 +21,10 @@ CONSOLIDATED_ROUTERS: Dict[str, Dict[str, Any]] = {
         "prefix": "/api/system",
         "description": "System status, health, diagnostics, and actions",
         "consolidates": [
-            "system_status_router.py",
-            "health_router.py", 
-            "system_run_router.py",
-            "diagnostics_router.py"
+            "system_status_router.py (deleted)",
+            "health_router.py (deleted)", 
+            "system_run_router.py (deleted)",
+            "diagnostics_router.py (deleted)"
         ],
         "endpoints": [
             "GET /api/system/status",
@@ -39,7 +39,7 @@ CONSOLIDATED_ROUTERS: Dict[str, Dict[str, Any]] = {
         "prefix": "/api/logs",
         "description": "All log file access (nightly, intraday, scheduler, backend)",
         "consolidates": [
-            "nightly_logs_router.py",
+            "nightly_logs_router.py (deleted)",
             "intraday_logs_router.py (log endpoints only)"
         ],
         "endpoints": [
@@ -95,11 +95,12 @@ CONSOLIDATED_ROUTERS: Dict[str, Dict[str, Any]] = {
         "prefix": "/admin",
         "description": "Admin operations, settings, replay control, tools",
         "consolidates": [
-            "admin_consolidated_router.py",
+            "admin_consolidated_router.py (deleted)",
             "backend/admin/routes.py",
             "backend/admin/admin_tools_router.py",
             "settings_router.py",
-            "swing_replay_router.py"
+            "swing_replay_router.py",
+            "dashboard_router.py"
         ],
         "endpoints": [
             "GET /admin/status",
@@ -231,36 +232,26 @@ STANDALONE_ROUTERS: Dict[str, Dict[str, Any]] = {
 
 
 # =========================================================================
-# DEPRECATED ROUTERS (Replaced by Consolidated Routers)
+# DEPRECATED ROUTERS (Deleted - Replaced by Consolidated Routers)
 # =========================================================================
 
 DEPRECATED_ROUTERS: List[str] = [
-    # Replaced by system_router
+    # Replaced by system_router - DELETED
     "system_status_router.py",
     "health_router.py",
     "system_run_router.py",
     "diagnostics_router.py",
     
-    # Replaced by logs_router
+    # Replaced by logs_router - DELETED
     "nightly_logs_router.py",
-    # Note: intraday_logs_router.py kept for bot-specific endpoints
     
-    # Replaced by bots_router (aggregation layer)
-    "bots_page_router.py",
-    "bots_hub_router.py",
-    # Note: eod_bots_router.py kept for detailed EOD operations
-    
-    # Replaced by insights_router
-    "insights_router.py (kept for delegation)",
-    "metrics_router.py (kept for delegation)",
-    "portfolio_router.py (kept for delegation)",
-    
-    # Replaced by admin_router_final
+    # Replaced by admin_router_final - DELETED
     "admin_consolidated_router.py",
-    "backend/admin/routes.py (kept for delegation)",
-    "backend/admin/admin_tools_router.py (kept for delegation)",
-    "settings_router.py (kept for delegation)",
-    "swing_replay_router.py (kept for delegation)",
+    
+    # Unused routers - DELETED in cleanup
+    "intraday_stream_router.py",
+    "intraday_tape_router.py",
+    "settings_consolidated_router.py",
 ]
 
 
@@ -271,13 +262,14 @@ DEPRECATED_ROUTERS: List[str] = [
 def get_router_summary() -> Dict[str, Any]:
     """Get a summary of all routers in the system."""
     return {
-        "version": "2.0.0",
+        "version": "2.1.0",
         "updated": "2026-01-26",
         "summary": {
             "consolidated_routers": len(CONSOLIDATED_ROUTERS),
             "standalone_routers": len(STANDALONE_ROUTERS),
             "total_active_routers": len(CONSOLIDATED_ROUTERS) + len(STANDALONE_ROUTERS),
-            "deprecated_routers": len(DEPRECATED_ROUTERS)
+            "deprecated_routers": len(DEPRECATED_ROUTERS),
+            "cleanup_status": "complete"
         },
         "consolidated": CONSOLIDATED_ROUTERS,
         "standalone": STANDALONE_ROUTERS,

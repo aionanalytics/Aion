@@ -3,11 +3,12 @@
 Consolidated Admin Router — AION Analytics
 
 Consolidates admin-related endpoints from:
-  - admin_consolidated_router.py
+  - admin_consolidated_router.py (deleted - functionality moved here)
   - backend/admin/routes.py
   - backend/admin/admin_tools_router.py
   - settings_router.py
   - swing_replay_router.py
+  - dashboard_router.py
 
 Endpoints:
   - GET  /admin/status               (system health)
@@ -31,6 +32,7 @@ from fastapi import APIRouter, HTTPException, Request, Query
 from backend.core.config import PATHS, TIMEZONE
 
 # Import existing routers to delegate functionality
+# Note: admin_consolidated_router was deleted - functionality moved to this file
 try:
     from backend.routers import admin_consolidated_router
 except ImportError:
