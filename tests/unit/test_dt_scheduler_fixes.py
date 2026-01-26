@@ -47,7 +47,7 @@ class TestIsMarketOpenOnDate:
     def test_fallback_weekday_check(self):
         """Test fallback to simple weekday check when market_hours is unavailable."""
         # Patch to raise exception to test fallback
-        with patch('dt_backend.jobs.dt_scheduler.is_market_open', side_effect=ImportError):
+        with patch('dt_backend.core.market_hours.is_market_open', side_effect=ImportError):
             # Monday should return True (weekday < 5)
             result = _is_market_open_on_date("2024-01-08")
             assert result is True
@@ -62,7 +62,7 @@ class TestIsMarketOpenOnDate:
     
     def test_invalid_date_returns_false(self):
         """Test that invalid date string returns False."""
-        with patch('dt_backend.jobs.dt_scheduler.is_market_open', side_effect=ImportError):
+        with patch('dt_backend.core.market_hours.is_market_open', side_effect=ImportError):
             result = _is_market_open_on_date("not-a-date")
             assert result is False
 
