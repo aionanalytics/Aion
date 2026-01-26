@@ -14,6 +14,7 @@ import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 
 import { LineChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { PerformanceChart } from "@/components/charts/PerformanceChart";
 
 // -----------------------------
 // Types
@@ -223,19 +224,12 @@ function OnOffDot({
 
 function MiniPerfChart({ data }: { data: Array<{ t: string; value: number }> }) {
   return (
-    <div className="h-[120px] w-full">
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data}>
-          <XAxis dataKey="t" hide />
-          <YAxis hide domain={["auto", "auto"]} />
-          <Tooltip
-            contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))" }}
-            labelStyle={{ color: "hsl(var(--muted-foreground))" }}
-          />
-          <Line type="monotone" dataKey="value" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} isAnimationActive={false} />
-        </LineChart>
-      </ResponsiveContainer>
-    </div>
+    <PerformanceChart
+      data={data}
+      valueLabel="Equity"
+      compact={true}
+      className="h-[120px] w-full"
+    />
   );
 }
 
