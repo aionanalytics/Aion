@@ -266,10 +266,10 @@ export default function ProfilePage() {
 
   const summary = useMemo(() => {
     const cash = 27028.0;
-    const invested = holdings.reduce((acc, h) => acc + h.qty * h.last, 0);
+    const invested = holdings.reduce((acc: number, h: Holding) => acc + h.qty * h.last, 0);
     const total = cash + invested;
 
-    const costBasis = holdings.reduce((acc, h) => acc + h.qty * h.avg, 0);
+    const costBasis = holdings.reduce((acc: number, h: Holding) => acc + h.qty * h.avg, 0);
     const totalProfit = invested - costBasis;
 
     const eq0 = equitySeries[0]?.equity ?? total;
@@ -289,15 +289,15 @@ export default function ProfilePage() {
 
   const filteredHoldings = useMemo(() => {
     return holdings
-      .filter((h) => selectedSectors.includes(h.sector))
-      .map((h) => {
+      .filter((h: Holding) => selectedSectors.includes(h.sector))
+      .map((h: Holding) => {
         const mv = h.qty * h.last;
         const cb = h.qty * h.avg;
         const pnl = mv - cb;
         const pnlPct = cb > 0 ? pnl / cb : 0;
         return { ...h, mv, pnl, pnlPct };
       })
-      .sort((a, b) => b.mv - a.mv);
+      .sort((a: any, b: any) => b.mv - a.mv);
   }, [holdings, selectedSectors]);
 
   const toggleSector = (sector: string) => {
@@ -310,7 +310,7 @@ export default function ProfilePage() {
   const clearSectors = () => setSelectedSectors([]);
 
   const chartMinMax = useMemo(() => {
-    const vals = equitySeries.map((p) => p.equity);
+    const vals = equitySeries.map((p: EquityPoint) => p.equity);
     const min = Math.min(...vals);
     const max = Math.max(...vals);
     return { min: min * 0.995, max: max * 1.005 };
@@ -392,7 +392,7 @@ export default function ProfilePage() {
               }
             >
               <PerformanceChart
-                data={equitySeries.map(e => ({ t: e.t, value: e.equity }))}
+                data={equitySeries.map((e: EquityPoint) => ({ t: e.t, value: e.equity }))}
                 title=""
                 valueLabel="Equity"
                 showFooter={false}
@@ -563,7 +563,7 @@ export default function ProfilePage() {
                         </td>
                       </tr>
                     ) : (
-                      filteredHoldings.map((h) => {
+                      filteredHoldings.map((h: any) => {
                         const up = h.pnl >= 0;
                         return (
                           <tr key={h.symbol} className="text-sm">
