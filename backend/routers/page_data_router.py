@@ -29,7 +29,12 @@ try:
 except ImportError:
     from backend.config import PATHS, TIMEZONE  # type: ignore
 
-from utils.logger import log
+try:
+    from utils.logger import log
+except ImportError:
+    # Fallback if utils.logger is not available
+    def log(msg: str) -> None:
+        print(msg)
 
 router = APIRouter(prefix="/api/page", tags=["page-data"])
 
@@ -66,6 +71,42 @@ def _error_response(error: str, details: Optional[str] = None) -> Dict[str, Any]
         "details": details,
         "timestamp": datetime.now(TIMEZONE).isoformat(),
     }
+
+
+def _extract_signals_from_predictions(predictions: list, max_signals: int = 20) -> list:
+    """
+    Extract trading signals from predictions.
+    
+    Args:
+        predictions: List of prediction dicts with symbol, prediction, confidence, last_price
+        max_signals: Maximum number of signals to return
+        
+    Returns:
+        List of signal dicts with symbol, action, confidence, price
+    """
+    return [
+        {
+            "symbol": p.get("symbol"),
+            "action": "BUY" if p.get("prediction", 0) > 0 else "SELL",
+            "confidence": p.get("confidence", 0),
+            "price": p.get("last_price", 0),
+        }
+        for p in predictions[:max_signals]
+    ]
+
+
+def _populate_result_with_predictions(result: Dict[str, Any], predictions: list) -> None:
+    """
+    Populate result dict with predictions and signals.
+    
+    Args:
+        result: Result dict to populate (modified in place)
+        predictions: List of prediction dicts
+    """
+    result["predictions_by_horizon"]["1d"] = predictions[:100]
+    result["predictions_by_horizon"]["1w"] = predictions[:50]
+    result["predictions_by_horizon"]["1m"] = predictions[:30]
+    result["signals"] = _extract_signals_from_predictions(predictions, max_signals=20)
 
 
 # -------------------------
@@ -306,21 +347,7 @@ async def get_predict_page_data() -> Dict[str, Any]:
             if opt_data and isinstance(opt_data, dict):
                 predictions = opt_data.get("predictions", [])
                 if isinstance(predictions, list) and predictions:
-                    result["predictions_by_horizon"]["1d"] = predictions[:100]
-                    result["predictions_by_horizon"]["1w"] = predictions[:50]
-                    result["predictions_by_horizon"]["1m"] = predictions[:30]
-                    
-                    # Extract signals
-                    result["signals"] = [
-                        {
-                            "symbol": p.get("symbol"),
-                            "action": "BUY" if p.get("prediction", 0) > 0 else "SELL",
-                            "confidence": p.get("confidence", 0),
-                            "price": p.get("last_price", 0),
-                        }
-                        for p in predictions[:20]
-                    ]
-                    
+                    _populate_result_with_predictions(result, predictions)
                     return result
     except Exception as e:
         log(f"[page_data] Warning: rolling_optimized failed: {e}")
@@ -358,22 +385,7 @@ async def get_predict_page_data() -> Dict[str, Any]:
                     if predictions:
                         # Sort by confidence descending
                         predictions.sort(key=lambda x: x.get("confidence", 0), reverse=True)
-                        
-                        result["predictions_by_horizon"]["1d"] = predictions[:100]
-                        result["predictions_by_horizon"]["1w"] = predictions[:50]
-                        result["predictions_by_horizon"]["1m"] = predictions[:30]
-                        
-                        # Extract signals
-                        result["signals"] = [
-                            {
-                                "symbol": p.get("symbol"),
-                                "action": "BUY" if p.get("prediction", 0) > 0 else "SELL",
-                                "confidence": p.get("confidence", 0),
-                                "price": p.get("last_price", 0),
-                            }
-                            for p in predictions[:20]
-                        ]
-                        
+                        _populate_result_with_predictions(result, predictions)
                         return result
     except Exception as e:
         log(f"[page_data] Warning: latest_predictions.json failed: {e}")
@@ -407,22 +419,7 @@ async def get_predict_page_data() -> Dict[str, Any]:
             if predictions:
                 # Sort by confidence descending
                 predictions.sort(key=lambda x: x.get("confidence", 0), reverse=True)
-                
-                result["predictions_by_horizon"]["1d"] = predictions[:100]
-                result["predictions_by_horizon"]["1w"] = predictions[:50]
-                result["predictions_by_horizon"]["1m"] = predictions[:30]
-                
-                # Extract signals
-                result["signals"] = [
-                    {
-                        "symbol": p.get("symbol"),
-                        "action": "BUY" if p.get("prediction", 0) > 0 else "SELL",
-                        "confidence": p.get("confidence", 0),
-                        "price": p.get("last_price", 0),
-                    }
-                    for p in predictions[:20]
-                ]
-                
+                _populate_result_with_predictions(result, predictions)
                 return result
     except Exception as e:
         log(f"[page_data] Warning: rolling.json.gz fallback failed: {e}")
