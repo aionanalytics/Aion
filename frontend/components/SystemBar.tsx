@@ -41,19 +41,49 @@ export default function SystemBar() {
     const url = `${apiBase}/api/system/status`;
 
     try {
+      console.log('[SystemBar] Fetching system status from:', url);
       const res = await fetch(url, { cache: "no-store" });
+      
+      console.log('[SystemBar] Response status:', res.status, res.statusText);
+      
       if (!res.ok) {
         const text = await res.text().catch(() => "");
+        console.error('[SystemBar] Fetch failed:', {
+          status: res.status,
+          statusText: res.statusText,
+          responseText: text.slice(0, 200)
+        });
         throw new Error(`HTTP ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 120)}` : ""}`);
       }
 
       const data = await res.json();
+      console.log('[SystemBar] System status data:', {
+        hasSupervisor: !!data?.supervisor,
+        hasCoverage: !!data?.coverage,
+        driftStatus: data?.supervisor?.components?.drift?.status,
+        modelsStatus: data?.supervisor?.components?.models?.status
+      });
 
       const sup = data?.supervisor;
       const driftStatus = sup?.components?.drift?.status;
       const modelsStatus = sup?.components?.models?.status;
       const newsStatus = sup?.components?.intel?.news_intel?.status;
       const tickers = data?.coverage?.symbols;
+
+      // Log warnings for critical/degraded statuses
+      const logStatusWarnings = (status: string | undefined, component: string) => {
+        if (!status) return;
+        const normalized = status.toLowerCase();
+        if (normalized === 'critical' || normalized === 'error') {
+          console.warn(`[SystemBar] ${component} - Critical/Error status:`, status);
+        } else if (normalized === 'warning' || normalized === 'degraded') {
+          console.warn(`[SystemBar] ${component} - Warning/Degraded status:`, status);
+        }
+      };
+
+      logStatusWarnings(driftStatus, 'Drift');
+      logStatusWarnings(modelsStatus, 'Models');
+      logStatusWarnings(newsStatus, 'News');
 
       setStatus({
         drift: prettyStatus(driftStatus),
@@ -66,14 +96,17 @@ export default function SystemBar() {
         debug: "",
       });
     } catch (e: any) {
+      console.error('[SystemBar] Error fetching system status:', {
+        url,
+        error: e?.message || String(e),
+        stack: e?.stack
+      });
       setStatus((prev) => ({
         ...prev,
         drift: "⚠️ Offline",
         retraining: "—",
         debug: `FAIL ${url} — ${e?.message || String(e)}`,
       }));
-      // Also log so you can see it in console immediately
-      console.error("[SystemBar]", url, e);
     }
   }
 

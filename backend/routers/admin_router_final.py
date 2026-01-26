@@ -19,6 +19,7 @@ Endpoints:
   - GET  /admin/replay/status        (replay status)
   - POST /admin/login                (authentication)
   - POST /admin/tools/*              (admin tools)
+  - POST /admin/system/restart       (system restart)
 """
 
 from __future__ import annotations
@@ -27,13 +28,27 @@ import inspect
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, HTTPException, Request, Query
+from fastapi import APIRouter, HTTPException, Request, Query, Depends
 
 from backend.core.config import PATHS, TIMEZONE
 
-# Import existing routers to delegate functionality
-# Note: admin_consolidated_router was deleted - functionality moved to this file
+# Import authentication and dependencies
+try:
+    from backend.admin.routes import admin_required_req
+except ImportError:
+    admin_required_req = None
 
+try:
+    from backend.admin.deps import admin_required
+except ImportError:
+    admin_required = None
+
+try:
+    from backend.admin.admin_tools_router import get_live_logs
+except ImportError:
+    get_live_logs = None
+
+# Import existing routers to delegate functionality
 try:
     from backend.admin import routes as admin_routes
 except ImportError:
@@ -188,18 +203,18 @@ async def test_api_keys(req: Request) -> Dict[str, Any]:
 # =========================================================================
 
 @router.get("/replay/status")
-async def get_replay_status() -> Dict[str, Any]:
+async def get_replay_status(_token: str = Depends(admin_required_req) if admin_required_req else None) -> Dict[str, Any]:
     """
-    Get swing replay status.
+    Get swing replay status - requires admin authentication
     """
+    # Try admin_routes first (has proper implementation)
+    if admin_routes and hasattr(admin_routes, 'replay_status'):
+        # The function expects Depends(admin_required_req) which already validated the token
+        return await admin_routes.replay_status(_token or "")
+    
+    # Fallback: check swing_replay_router
     if swing_replay_router:
         result = await _call_if_exists(swing_replay_router, "status")
-        if result:
-            return result
-    
-    # Fallback: check admin_routes
-    if admin_routes:
-        result = await _call_if_exists(admin_routes, "get_replay_status")
         if result:
             return result
     
@@ -211,30 +226,33 @@ async def get_replay_status() -> Dict[str, Any]:
 
 @router.post("/replay/start")
 async def start_replay(
-    lookback_days: int = Query(default=28),
-    version: Optional[str] = Query(default=None),
-    force: bool = Query(default=False),
+    req: Request,
+    _token: str = Depends(admin_required_req) if admin_required_req else None
 ) -> Dict[str, Any]:
     """
-    Start swing historical replay.
+    Start swing historical replay - requires admin authentication
     """
+    # Try admin_routes first (has proper implementation)
+    if admin_routes and hasattr(admin_routes, 'replay_start'):
+        return await admin_routes.replay_start(req, _token or "")
+    
+    # Fallback: check swing_replay_router
     if swing_replay_router:
+        try:
+            payload = await req.json()
+        except Exception:
+            payload = {}
+        
+        lookback_days = payload.get("lookback_days", 28)
+        version = payload.get("version")
+        force = payload.get("force", False)
+        
         result = await _call_if_exists(
             swing_replay_router,
             "start",
             lookback_days=lookback_days,
             version=version,
             force=force
-        )
-        if result:
-            return result
-    
-    # Fallback: check admin_routes
-    if admin_routes:
-        result = await _call_if_exists(
-            admin_routes,
-            "start_replay",
-            lookback_days=lookback_days
         )
         if result:
             return result
@@ -284,12 +302,11 @@ async def reset_replay(force: bool = Query(default=False)) -> Dict[str, Any]:
 @router.post("/login")
 async def admin_login(req: Request) -> Dict[str, Any]:
     """
-    Admin authentication.
+    Admin authentication - delegates to backend.admin.routes.admin_login
     """
-    if admin_routes:
-        result = await _call_if_exists(admin_routes, "admin_login", req=req)
-        if result:
-            return result
+    if admin_routes and hasattr(admin_routes, 'admin_login'):
+        # Use the actual admin_login function from backend.admin.routes
+        return await admin_routes.admin_login(req)
     
     raise HTTPException(status_code=503, detail="Admin login not available")
 
@@ -298,23 +315,52 @@ async def admin_login(req: Request) -> Dict[str, Any]:
 # ADMIN TOOLS
 # =========================================================================
 
+@router.post("/system/restart")
+async def system_restart(_token: str = Depends(admin_required_req) if admin_required_req else None) -> Dict[str, Any]:
+    """
+    Restart system (requires admin auth) - delegates to backend.admin.routes
+    """
+    if admin_routes and hasattr(admin_routes, 'restart_services'):
+        # The restart_services function expects Depends(admin_required_req)
+        return admin_routes.restart_services(_token or "")
+    
+    return {
+        "status": "error",
+        "message": "System restart not available",
+    }
+
+
 @router.get("/tools/logs")
-async def get_tool_logs(lines: int = Query(default=100)) -> Dict[str, Any]:
+async def get_tool_logs(
+    lines: int = Query(default=100),
+    _user = Depends(admin_required) if admin_required else None
+) -> Dict[str, Any]:
     """
-    Get system logs via admin tools.
+    Get system logs via admin tools - requires admin authentication
     """
-    return await get_admin_logs(lines=lines)
+    # Use get_live_logs helper if available (from admin_tools_router)
+    if get_live_logs and callable(get_live_logs):
+        return get_live_logs()
+    
+    # Fallback to admin_tools_router.get_logs if available
+    if admin_tools_router and hasattr(admin_tools_router, 'get_logs'):
+        # The function expects Depends(admin_required)
+        return admin_tools_router.get_logs(_user)
+    
+    return {
+        "timestamp": datetime.now(TIMEZONE).isoformat(),
+        "logs": [],
+        "count": 0,
+    }
 
 
 @router.post("/tools/clear-locks")
-async def clear_locks() -> Dict[str, Any]:
+async def clear_locks(_user = Depends(admin_required) if admin_required else None) -> Dict[str, Any]:
     """
-    Clear system locks.
+    Clear system locks - requires admin authentication
     """
-    if admin_tools_router:
-        result = await _call_if_exists(admin_tools_router, "clear_locks")
-        if result:
-            return result
+    if admin_tools_router and hasattr(admin_tools_router, 'clear_locks'):
+        return admin_tools_router.clear_locks(_user)
     
     return {
         "status": "ok",
@@ -323,14 +369,12 @@ async def clear_locks() -> Dict[str, Any]:
 
 
 @router.post("/tools/git-pull")
-async def git_pull() -> Dict[str, Any]:
+async def git_pull(_user = Depends(admin_required) if admin_required else None) -> Dict[str, Any]:
     """
-    Pull latest code from git.
+    Pull latest code from git - requires admin authentication
     """
-    if admin_tools_router:
-        result = await _call_if_exists(admin_tools_router, "git_pull")
-        if result:
-            return result
+    if admin_tools_router and hasattr(admin_tools_router, 'git_pull'):
+        return admin_tools_router.git_pull(_user)
     
     return {
         "status": "error",
@@ -339,32 +383,14 @@ async def git_pull() -> Dict[str, Any]:
 
 
 @router.post("/tools/refresh-universes")
-async def refresh_universes() -> Dict[str, Any]:
+async def refresh_universes(_user = Depends(admin_required) if admin_required else None) -> Dict[str, Any]:
     """
-    Refresh trading universes.
+    Refresh trading universes - requires admin authentication
     """
-    if admin_tools_router:
-        result = await _call_if_exists(admin_tools_router, "refresh_universes")
-        if result:
-            return result
+    if admin_tools_router and hasattr(admin_tools_router, 'refresh_universes_tool'):
+        return admin_tools_router.refresh_universes_tool(_user)
     
     return {
         "status": "error",
         "message": "Universe refresh not available",
-    }
-
-
-@router.post("/system/restart")
-async def system_restart() -> Dict[str, Any]:
-    """
-    Restart system (requires admin auth).
-    """
-    if admin_routes:
-        result = await _call_if_exists(admin_routes, "restart_system")
-        if result:
-            return result
-    
-    return {
-        "status": "error",
-        "message": "System restart not available",
     }

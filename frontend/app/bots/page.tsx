@@ -603,9 +603,31 @@ function BotRow({
   const equity = clampNum(statusNode?.equity, clampNum(cash, 0) + clampNum(invested, 0));
 
   const series = useMemo(() => {
-    const maybeCurve = statusNode?.equity_curve ?? statusNode?.pnl_curve;
-    return coerceCurve(maybeCurve, equity);
-  }, [statusNode, equity]);
+    const equityCurve = statusNode?.equity_curve;
+    const pnlCurve = statusNode?.pnl_curve;
+    const maybeCurve = equityCurve ?? pnlCurve;
+    
+    // Debug logging for chart data (for debugging data flow issues)
+    // TODO: Consider removing or gating behind debug flag for production
+    console.log(`[BotRow:${botKey}] Chart data source:`, {
+      hasEquityCurve: !!equityCurve,
+      hasPnlCurve: !!pnlCurve,
+      usingSource: equityCurve ? 'equity_curve' : pnlCurve ? 'pnl_curve' : 'none',
+      curveLength: Array.isArray(maybeCurve) ? maybeCurve.length : 0,
+      fallbackEquity: equity
+    });
+    
+    const result = coerceCurve(maybeCurve, equity);
+    
+    console.log(`[BotRow:${botKey}] After coerceCurve:`, {
+      resultLength: result.length,
+      isFallback: !Array.isArray(maybeCurve) || maybeCurve.length === 0,
+      firstPoint: result[0],
+      lastPoint: result[result.length - 1]
+    });
+    
+    return result;
+  }, [statusNode, equity, botKey]);
 
   async function save() {
     setSaving(true);
