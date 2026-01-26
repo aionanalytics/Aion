@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from backend.monitoring.alerting import send_alert
 
 # Import router functions at module level for better performance
-from backend.routers.health_router import health_check
+from backend.routers.system_router import health_check
 from backend.routers.eod_bots_router import eod_status
 from backend.routers.intraday_router import api_intraday_snapshot
 from backend.routers.live_prices_router import api_live_prices

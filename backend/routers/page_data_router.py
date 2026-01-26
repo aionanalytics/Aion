@@ -349,7 +349,7 @@ async def get_tools_page_data() -> Dict[str, Any]:
         
         # Try to use existing system status router
         try:
-            from backend.routers.system_status_router import get_system_status
+            from backend.routers.system_router import get_system_status
             import inspect
             
             status_data = get_system_status()
