@@ -251,7 +251,14 @@ export default function ProfilePage() {
   const holdings = useMemo(() => {
     // Use real data if available, otherwise fallback to mock
     if (data?.portfolio?.holdings?.length > 0) {
-      return data.portfolio.holdings;
+      // Normalize the data structure to match Holding type
+      return data.portfolio.holdings.map((h: any) => ({
+        symbol: h.symbol || h.ticker || '',
+        sector: h.sector || h.industry || 'Other',
+        qty: h.qty || h.quantity || h.shares || 0,
+        avg: h.avg || h.avg_price || h.cost_basis || 0,
+        last: h.last || h.price || h.current_price || 0,
+      }));
     }
     return buildMockHoldings();
   }, [data]);
@@ -259,7 +266,11 @@ export default function ProfilePage() {
   const equitySeries = useMemo(() => {
     // Use real equity curve data if available, otherwise fallback to mock
     if (data?.bots?.equity_curve?.length > 0) {
-      return data.bots.equity_curve;
+      // Normalize the data structure - backend might use 'value' or 'equity'
+      return data.bots.equity_curve.map((point: any) => ({
+        t: point.t || point.date || '',
+        equity: point.equity || point.value || 0,
+      }));
     }
     return buildMockEquity(range);
   }, [data, range]);
