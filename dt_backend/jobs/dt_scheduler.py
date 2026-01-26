@@ -81,6 +81,31 @@ def _close_plus_one_ts(ny: datetime) -> datetime:
     return ny.replace(hour=16, minute=0, second=1, microsecond=0)
 
 
+def _is_market_open_on_date(date_str: str) -> bool:
+    """Check if a specific date is a trading day (not weekend/holiday).
+    
+    Args:
+        date_str: ISO date string (YYYY-MM-DD)
+    
+    Returns:
+        True if the date is a trading day (weekday, not a holiday)
+        False if the date is a weekend or holiday
+    """
+    try:
+        # Import market_hours module if available
+        from dt_backend.core.market_hours import is_market_open
+        return is_market_open(date_str)
+    except Exception:
+        # Fallback: simple weekday check (no holiday calendar)
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(date_str)
+            # 5=Saturday, 6=Sunday
+            return dt.weekday() < 5
+        except Exception:
+            return False
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -123,6 +148,7 @@ def run_dt_scheduler(
         was_open = False
         last_bars_t = 0.0
         last_trade_t = 0.0
+        last_late_start_session = None  # Track processed late-start sessions to prevent infinite loop
 
         while True:
             # Always define a real "now" (UTC) every loop.
@@ -176,6 +202,7 @@ def run_dt_scheduler(
                                 log(f"[dt_scheduler] running DT nightly for {sess} …")
                                 nres = run_dt_nightly_job(session_date=sess)
                                 log(f"[dt_scheduler] DT nightly result: {nres}")
+                                last_late_start_session = sess  # Mark session as processed
                         except Exception as e:
                             warn(f"[dt_scheduler] DT nightly failed: {e}\n{traceback.format_exc()}")
                 except Exception as e:
@@ -191,10 +218,18 @@ def run_dt_scheduler(
                     if ny >= ts:
                         sess = ts.date().isoformat()
                         last_n = last_dt_nightly_session_date() or ""
-                        if last_n != sess:
+                        
+                        # Check if the session date is a trading day (not weekend/holiday)
+                        if not _is_market_open_on_date(sess):
+                            if last_late_start_session != sess:
+                                log(f"[dt_scheduler] market closed; skipping DT nightly for {sess} (weekend/holiday)")
+                                last_late_start_session = sess  # Mark as processed to avoid repeated logs
+                        # Only run if session hasn't been processed yet (check both last_n and last_late_start_session)
+                        elif last_n != sess and last_late_start_session != sess:
                             log(f"[dt_scheduler] market closed; scheduler late-start → running DT nightly for {sess} …")
                             nres = run_dt_nightly_job(session_date=sess)
                             log(f"[dt_scheduler] DT nightly result: {nres}")
+                            last_late_start_session = sess  # Mark session as processed to prevent re-run
                 except Exception as e:
                     warn(f"[dt_scheduler] DT nightly late-start check failed: {e}\n{traceback.format_exc()}")
 
