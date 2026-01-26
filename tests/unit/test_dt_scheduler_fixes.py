@@ -235,9 +235,6 @@ class TestSchedulerWeekendHolidaySkip:
         with pytest.raises(KeyboardInterrupt):
             run_dt_scheduler()
         
-        # Debug: Print all log calls
-        print(f"Log calls: {[str(call) for call in mock_log.call_args_list]}")
-        
         # Check that skip message was logged
         skip_logged = any(
             'skipping DT nightly' in str(call[0]) and 'weekend/holiday' in str(call[0])

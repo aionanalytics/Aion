@@ -98,7 +98,6 @@ def _is_market_open_on_date(date_str: str) -> bool:
     except Exception:
         # Fallback: simple weekday check (no holiday calendar)
         try:
-            from datetime import datetime
             dt = datetime.fromisoformat(date_str)
             # 5=Saturday, 6=Sunday
             return dt.weekday() < 5
