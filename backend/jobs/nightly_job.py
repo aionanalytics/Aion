@@ -180,6 +180,9 @@ update_aion_brain = _safe_import("backend.services.aion_brain_updater", "update_
 # Accuracy engine
 compute_accuracy = _safe_import("backend.services.accuracy_engine", "compute_accuracy")
 
+# Rolling optimizer (creates optimized frontend data files)
+optimize_rolling_data = _safe_import("backend.services.rolling_optimizer", "optimize_rolling_data")
+
 # Progress bar (optional but nice)
 progress_bar = _safe_import("utils.progress_bar", "progress_bar")
 
@@ -196,6 +199,7 @@ PIPELINE: List[Tuple[str, str]] = [
     ("training_sector", "Sector training (model training per sector)"),
     ("training_global", "Global training (model training across universe)"),
     ("predictions", "Regression predictions → Rolling"),
+    ("rolling_optimizer", "Optimize rolling data for frontend"),
     ("prediction_logger", "Prediction logging (UI feed)"),
     ("accuracy_engine", "Accuracy engine (calibration + windows)"),
     ("context", "Context state"),
@@ -664,9 +668,26 @@ def run_nightly_job(
             _write_summary(summary)
             raise
 
-        # 11) Prediction logger (UI feed + ledger)
+        # 11) Rolling optimizer (optimize data for frontend)
         key, title = PIPELINE[11]
         _phase(title, 12, TOTAL_PHASES)
+        t0 = time.time()
+        try:
+            _require(optimize_rolling_data, "backend.services.rolling_optimizer.optimize_rolling_data")
+            
+            res = optimize_rolling_data()
+            _record_ok(summary, key, res, t0)
+            _write_summary(summary)
+            log("✅ Rolling data optimization complete.")
+        except Exception as e:
+            _record_err(summary, key, e, t0)
+            _write_summary(summary)
+            # Don't raise - optimizer failure shouldn't stop the job
+            log(f"⚠️ Rolling optimizer failed (continuing): {e}")
+
+        # 12) Prediction logger (UI feed + ledger)
+        key, title = PIPELINE[12]
+        _phase(title, 13, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(log_predictions, "backend.services.prediction_logger.log_predictions")
@@ -687,9 +708,9 @@ def run_nightly_job(
             _record_err(summary, key, e, t0)
             _write_summary(summary)
 
-        # 12) Accuracy engine (calibration + windows)
-        key, title = PIPELINE[12]
-        _phase(title, 13, TOTAL_PHASES)
+        # 13) Accuracy engine (calibration + windows)
+        key, title = PIPELINE[13]
+        _phase(title, 14, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(compute_accuracy, "backend.services.accuracy_engine.compute_accuracy")
@@ -701,9 +722,9 @@ def run_nightly_job(
             _record_err(summary, key, e, t0)
             _write_summary(summary)
 
-        # 13) Context state
-        key, title = PIPELINE[13]
-        _phase(title, 14, TOTAL_PHASES)
+        # 14) Context state
+        key, title = PIPELINE[14]
+        _phase(title, 15, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(build_context, "backend.core.context_state.build_context")
@@ -715,9 +736,9 @@ def run_nightly_job(
             _record_err(summary, key, e, t0)
             _write_summary(summary)
 
-        # 14) Regime detection
-        key, title = PIPELINE[14]
-        _phase(title, 15, TOTAL_PHASES)
+        # 15) Regime detection
+        key, title = PIPELINE[15]
+        _phase(title, 16, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(detect_regime, "backend.core.regime_detector.detect_regime")
@@ -729,9 +750,9 @@ def run_nightly_job(
             _record_err(summary, key, e, t0)
             _write_summary(summary)
 
-        # 15) Continuous learning (drift + memory)
-        key, title = PIPELINE[15]
-        _phase(title, 16, TOTAL_PHASES)
+        # 16) Continuous learning (drift + memory)
+        key, title = PIPELINE[16]
+        _phase(title, 17, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(run_continuous_learning, "backend.core.continuous_learning.run_continuous_learning")
@@ -743,9 +764,9 @@ def run_nightly_job(
             _record_err(summary, key, e, t0)
             _write_summary(summary)
 
-        # 16) Performance aggregation (system metrics)
-        key, title = PIPELINE[16]
-        _phase(title, 17, TOTAL_PHASES)
+        # 17) Performance aggregation (system metrics)
+        key, title = PIPELINE[17]
+        _phase(title, 18, TOTAL_PHASES)
         t0 = time.time()
         try:
             if aggregate_system_performance is None:
@@ -759,9 +780,9 @@ def run_nightly_job(
             _record_err(summary, key, e, t0)
             _write_summary(summary)
 
-        # 17) AION brain update (behavioral memory)
-        key, title = PIPELINE[17]
-        _phase(title, 18, TOTAL_PHASES)
+        # 18) AION brain update (behavioral memory)
+        key, title = PIPELINE[18]
+        _phase(title, 19, TOTAL_PHASES)
         t0 = time.time()
         try:
             if update_aion_brain is None:
@@ -775,9 +796,9 @@ def run_nightly_job(
             _record_err(summary, key, e, t0)
             _write_summary(summary)
 
-        # 18) Policy engine (brain-aligned)
-        key, title = PIPELINE[18]
-        _phase(title, 19, TOTAL_PHASES)
+        # 19) Policy engine (brain-aligned)
+        key, title = PIPELINE[19]
+        _phase(title, 20, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(apply_policy, "backend.core.policy_engine.apply_policy")
@@ -789,9 +810,9 @@ def run_nightly_job(
             _record_err(summary, key, e, t0)
             _write_summary(summary)
 
-        # 19) Swing Bot EOD Rebalance (after policy)
-        key, title = PIPELINE[19]
-        _phase(title, 20, TOTAL_PHASES)
+        # 20) Swing Bot EOD Rebalance (after policy)
+        key, title = PIPELINE[20]
+        _phase(title, 21, TOTAL_PHASES)
         t0 = time.time()
         try:
             bots = ["1w", "2w", "4w"]
@@ -845,9 +866,9 @@ def run_nightly_job(
         except Exception as e_refresh:
             log(f"[nightly_job] ⚠️ post-policy UI refresh failed (continuing): {e_refresh}")
 
-        # 20) Insights builder
-        key, title = PIPELINE[20]
-        _phase(title, 21, TOTAL_PHASES)
+        # 21) Insights builder
+        key, title = PIPELINE[21]
+        _phase(title, 22, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(build_daily_insights, "backend.services.insights_builder.build_daily_insights")
@@ -859,9 +880,9 @@ def run_nightly_job(
             _record_err(summary, key, e, t0)
             _write_summary(summary)
 
-        # 21) Supervisor agent
-        key, title = PIPELINE[21]
-        _phase(title, 22, TOTAL_PHASES)
+        # 22) Supervisor agent
+        key, title = PIPELINE[22]
+        _phase(title, 23, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(run_supervisor_agent, "backend.core.supervisor_agent.run_supervisor_agent")
