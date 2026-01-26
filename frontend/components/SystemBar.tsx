@@ -70,27 +70,27 @@ export default function SystemBar() {
       const newsStatus = sup?.components?.intel?.news_intel?.status;
       const tickers = data?.coverage?.symbols;
 
-      // Show appropriate UI for different statuses
-      const formatStatus = (status: string | undefined) => {
-        if (!status) return "⚪ Unknown";
+      // Log warnings for critical/degraded statuses
+      const logStatusWarnings = (status: string | undefined, component: string) => {
+        if (!status) return;
         const normalized = status.toLowerCase();
         if (normalized === 'critical' || normalized === 'error') {
-          console.warn('[SystemBar] Critical/Error status detected:', status);
-          return prettyStatus(status);
+          console.warn(`[SystemBar] ${component} - Critical/Error status:`, status);
+        } else if (normalized === 'warning' || normalized === 'degraded') {
+          console.warn(`[SystemBar] ${component} - Warning/Degraded status:`, status);
         }
-        if (normalized === 'warning' || normalized === 'degraded') {
-          console.warn('[SystemBar] Warning/Degraded status detected:', status);
-          return prettyStatus(status);
-        }
-        return prettyStatus(status);
       };
 
+      logStatusWarnings(driftStatus, 'Drift');
+      logStatusWarnings(modelsStatus, 'Models');
+      logStatusWarnings(newsStatus, 'News');
+
       setStatus({
-        drift: formatStatus(driftStatus),
-        retraining: formatStatus(modelsStatus),
+        drift: prettyStatus(driftStatus),
+        retraining: prettyStatus(modelsStatus),
         lastUpdate: sup?.generated_at || data?.server_time || "—",
         retrainCycles: "—",
-        newsCount: formatStatus(newsStatus),
+        newsCount: prettyStatus(newsStatus),
         tickersTracked: typeof tickers === "number" ? String(tickers) : "—",
         version: "AION v1.1.2",
         debug: "",

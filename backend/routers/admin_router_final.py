@@ -34,9 +34,8 @@ from backend.core.config import PATHS, TIMEZONE
 
 # Import authentication and dependencies
 try:
-    from backend.admin.routes import _extract_token, admin_required_req
+    from backend.admin.routes import admin_required_req
 except ImportError:
-    _extract_token = None
     admin_required_req = None
 
 try:
@@ -210,12 +209,8 @@ async def get_replay_status(_token: str = Depends(admin_required_req) if admin_r
     """
     # Try admin_routes first (has proper implementation)
     if admin_routes and hasattr(admin_routes, 'replay_status'):
-        # Create a fake request object with the token if needed
-        if _token:
-            from fastapi import Request as FastAPIRequest
-            # The function expects Depends(admin_required_req) which already validated
-            return await admin_routes.replay_status(_token)
-        return await admin_routes.replay_status("")
+        # The function expects Depends(admin_required_req) which already validated the token
+        return await admin_routes.replay_status(_token or "")
     
     # Fallback: check swing_replay_router
     if swing_replay_router:

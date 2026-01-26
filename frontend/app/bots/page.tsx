@@ -607,7 +607,8 @@ function BotRow({
     const pnlCurve = statusNode?.pnl_curve;
     const maybeCurve = equityCurve ?? pnlCurve;
     
-    // Debug logging for chart data
+    // Debug logging for chart data (for debugging data flow issues)
+    // TODO: Consider removing or gating behind debug flag for production
     console.log(`[BotRow:${botKey}] Chart data source:`, {
       hasEquityCurve: !!equityCurve,
       hasPnlCurve: !!pnlCurve,
