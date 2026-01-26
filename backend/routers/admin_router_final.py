@@ -33,10 +33,6 @@ from backend.core.config import PATHS, TIMEZONE
 
 # Import existing routers to delegate functionality
 # Note: admin_consolidated_router was deleted - functionality moved to this file
-try:
-    from backend.routers import admin_consolidated_router
-except ImportError:
-    admin_consolidated_router = None
 
 try:
     from backend.admin import routes as admin_routes
@@ -92,12 +88,6 @@ async def get_admin_status() -> Dict[str, Any]:
     """
     Get comprehensive system health and status.
     """
-    # Try admin_consolidated_router first
-    if admin_consolidated_router:
-        result = await _call_if_exists(admin_consolidated_router, "get_admin_status")
-        if result:
-            return result
-    
     # Fallback basic status
     return {
         "status": "ok",
