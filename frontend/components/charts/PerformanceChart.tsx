@@ -17,23 +17,32 @@ import {
 
 interface PerformanceChartProps {
   data: Array<{ t: string; value: number }>;
-  title: string;
+  title?: string;
   description?: string;
   valueLabel?: string;
   showFooter?: boolean;
   className?: string;
+  compact?: boolean; // When true, renders without Card wrapper for inline usage
 }
 
 export function PerformanceChart({
   data,
-  title,
+  title = "",
   description,
   valueLabel = "Value",
   showFooter = false,
   className,
+  compact = false,
 }: PerformanceChartProps) {
   // Calculate trend - handle edge cases
   if (data.length === 0) {
+    if (compact) {
+      return (
+        <div className={`w-full flex items-center justify-center text-white/60 ${className || ""}`}>
+          No data available
+        </div>
+      );
+    }
     return (
       <Card className={`border-white/10 bg-white/5 ${className || ""}`}>
         <CardHeader>
@@ -63,6 +72,62 @@ export function PerformanceChart({
     },
   } satisfies ChartConfig;
 
+  const chartContent = (
+    <ChartContainer config={chartConfig} className={compact ? "w-full h-full" : "h-[200px] w-full"}>
+      <LineChart
+        data={data}
+        margin={{
+          left: 12,
+          right: 12,
+          top: 12,
+          bottom: 12,
+        }}
+      >
+        {!compact && <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--muted))" vertical={false} />}
+        <XAxis
+          dataKey="t"
+          hide={compact}
+          tickLine={false}
+          axisLine={false}
+          tickMargin={8}
+          tickFormatter={(value) => {
+            const date = new Date(value);
+            return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+          }}
+          stroke="hsl(var(--muted-foreground))"
+        />
+        <YAxis
+          hide={compact}
+          tickLine={false}
+          axisLine={false}
+          tickMargin={8}
+          tickFormatter={(value) => `$${value.toLocaleString()}`}
+          stroke="hsl(var(--muted-foreground))"
+        />
+        <ChartTooltip
+          content={
+            <ChartTooltipContent
+              labelFormatter={(value) => new Date(value).toLocaleString()}
+            />
+          }
+        />
+        <Line
+          dataKey="value"
+          type="monotone"
+          stroke={`var(--color-value)`}
+          strokeWidth={2}
+          dot={false}
+        />
+      </LineChart>
+    </ChartContainer>
+  );
+
+  // Compact mode - no card wrapper
+  if (compact) {
+    return <div className={className || ""}>{chartContent}</div>;
+  }
+
+  // Full mode - with card wrapper
   return (
     <Card className={`border-white/10 bg-white/5 ${className || ""}`}>
       <CardHeader>
@@ -72,51 +137,7 @@ export function PerformanceChart({
         )}
       </CardHeader>
       <CardContent>
-        <ChartContainer config={chartConfig} className="h-[200px] w-full">
-          <LineChart
-            data={data}
-            margin={{
-              left: 12,
-              right: 12,
-              top: 12,
-              bottom: 12,
-            }}
-          >
-            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--muted))" vertical={false} />
-            <XAxis
-              dataKey="t"
-              tickLine={false}
-              axisLine={false}
-              tickMargin={8}
-              tickFormatter={(value) => {
-                const date = new Date(value);
-                return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-              }}
-              stroke="hsl(var(--muted-foreground))"
-            />
-            <YAxis
-              tickLine={false}
-              axisLine={false}
-              tickMargin={8}
-              tickFormatter={(value) => `$${value.toLocaleString()}`}
-              stroke="hsl(var(--muted-foreground))"
-            />
-            <ChartTooltip
-              content={
-                <ChartTooltipContent
-                  labelFormatter={(value) => new Date(value).toLocaleString()}
-                />
-              }
-            />
-            <Line
-              dataKey="value"
-              type="monotone"
-              stroke={`var(--color-value)`}
-              strokeWidth={2}
-              dot={false}
-            />
-          </LineChart>
-        </ChartContainer>
+        {chartContent}
         {showFooter && (
           <div className="mt-4 flex items-center gap-2 text-sm">
             <span className={`font-medium ${isPositive ? "text-green-400" : "text-red-400"}`}>

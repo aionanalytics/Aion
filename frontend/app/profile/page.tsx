@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import {
   LineChart,
   Line,
@@ -12,6 +12,7 @@ import {
   Pie,
   Cell,
 } from "recharts";
+import { PerformanceChart } from "@/components/charts/PerformanceChart";
 
 /**
  * AION Analytics — Profile / Portfolio page
@@ -219,17 +220,67 @@ function Card({
 export default function ProfilePage() {
   const [range, setRange] = useState<RangeKey>("1M");
   const [selectedSectors, setSelectedSectors] = useState<string[]>([...SECTORS]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [data, setData] = useState<any>(null);
 
-  const holdings = useMemo(() => buildMockHoldings(), []);
+  // Fetch real data from unified cache endpoint
+  useEffect(() => {
+    async function fetchData() {
+      try {
+        setLoading(true);
+        setError(null);
+        const response = await fetch("/api/backend/cache/unified");
+        if (!response.ok) {
+          throw new Error(`Failed to load: ${response.status}`);
+        }
+        const result = await response.json();
+        
+        // Extract data from cached response
+        setData(result.data);
+      } catch (e: any) {
+        console.error("Failed to load profile data:", e);
+        setError(e.message);
+      } finally {
+        setLoading(false);
+      }
+    }
+    fetchData();
+  }, []);
+
+  const holdings = useMemo(() => {
+    // Use real data if available, otherwise fallback to mock
+    if (data?.portfolio?.holdings?.length > 0) {
+      // Normalize the data structure to match Holding type
+      return data.portfolio.holdings.map((h: any) => ({
+        symbol: h.symbol || h.ticker || '',
+        sector: h.sector || h.industry || 'Other',
+        qty: h.qty || h.quantity || h.shares || 0,
+        avg: h.avg || h.avg_price || h.cost_basis || 0,
+        last: h.last || h.price || h.current_price || 0,
+      }));
+    }
+    return buildMockHoldings();
+  }, [data]);
   const allocation = useMemo(() => buildMockAllocation(holdings), [holdings]);
-  const equitySeries = useMemo(() => buildMockEquity(range), [range]);
+  const equitySeries = useMemo(() => {
+    // Use real equity curve data if available, otherwise fallback to mock
+    if (data?.bots?.equity_curve?.length > 0) {
+      // Normalize the data structure - backend might use 'value' or 'equity'
+      return data.bots.equity_curve.map((point: any) => ({
+        t: point.t || point.date || '',
+        equity: point.equity || point.value || 0,
+      }));
+    }
+    return buildMockEquity(range);
+  }, [data, range]);
 
   const summary = useMemo(() => {
     const cash = 27028.0;
-    const invested = holdings.reduce((acc, h) => acc + h.qty * h.last, 0);
+    const invested = holdings.reduce((acc: number, h: Holding) => acc + h.qty * h.last, 0);
     const total = cash + invested;
 
-    const costBasis = holdings.reduce((acc, h) => acc + h.qty * h.avg, 0);
+    const costBasis = holdings.reduce((acc: number, h: Holding) => acc + h.qty * h.avg, 0);
     const totalProfit = invested - costBasis;
 
     const eq0 = equitySeries[0]?.equity ?? total;
@@ -249,15 +300,15 @@ export default function ProfilePage() {
 
   const filteredHoldings = useMemo(() => {
     return holdings
-      .filter((h) => selectedSectors.includes(h.sector))
-      .map((h) => {
+      .filter((h: Holding) => selectedSectors.includes(h.sector))
+      .map((h: Holding) => {
         const mv = h.qty * h.last;
         const cb = h.qty * h.avg;
         const pnl = mv - cb;
         const pnlPct = cb > 0 ? pnl / cb : 0;
         return { ...h, mv, pnl, pnlPct };
       })
-      .sort((a, b) => b.mv - a.mv);
+      .sort((a: any, b: any) => b.mv - a.mv);
   }, [holdings, selectedSectors]);
 
   const toggleSector = (sector: string) => {
@@ -270,15 +321,41 @@ export default function ProfilePage() {
   const clearSectors = () => setSelectedSectors([]);
 
   const chartMinMax = useMemo(() => {
-    const vals = equitySeries.map((p) => p.equity);
+    const vals = equitySeries.map((p: EquityPoint) => p.equity);
     const min = Math.min(...vals);
     const max = Math.max(...vals);
     return { min: min * 0.995, max: max * 1.005 };
   }, [equitySeries]);
 
+  // Loading state
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-950 to-black text-white p-8">
+        <div className="mx-auto w-full max-w-[1400px]">
+          <div className="text-2xl font-bold">Loading portfolio data...</div>
+        </div>
+      </div>
+    );
+  }
+
+  // Error state - show error but fall back to mock data
+  if (error) {
+    console.warn("Profile page using mock data due to API error:", error);
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-950 to-black text-white">
       <div className="mx-auto w-full max-w-[1400px] px-6 py-8">
+        {/* Error banner */}
+        {error && (
+          <div className="mb-4 rounded-xl border border-orange-800/50 bg-orange-950/40 p-4">
+            <div className="text-orange-400 font-semibold">⚠️ Using Demo Data</div>
+            <div className="mt-1 text-sm text-orange-300/80">
+              Could not load real data from backend. Showing demo data instead.
+            </div>
+          </div>
+        )}
+        
         {/* Header */}
         <div className="flex items-end justify-between gap-4">
           <div>
@@ -325,38 +402,13 @@ export default function ProfilePage() {
                 </span>
               }
             >
-              <div className="h-[360px] w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={equitySeries} margin={{ left: 10, right: 20, top: 10, bottom: 10 }}>
-                    <XAxis
-                      dataKey="t"
-                      tick={{ fill: "#94a3b8", fontSize: 12 }}
-                      axisLine={{ stroke: "rgba(148,163,184,0.25)" }}
-                      tickLine={{ stroke: "rgba(148,163,184,0.15)" }}
-                      minTickGap={12}
-                    />
-                    <YAxis
-                      domain={[chartMinMax.min, chartMinMax.max]}
-                      tick={{ fill: "#94a3b8", fontSize: 12 }}
-                      axisLine={{ stroke: "rgba(148,163,184,0.25)" }}
-                      tickLine={{ stroke: "rgba(148,163,184,0.15)" }}
-                      tickFormatter={(v: number) => `$${Math.round(v).toLocaleString()}`}
-                      width={80}
-                    />
-                    <Tooltip
-                      contentStyle={{
-                        background: "rgba(2,6,23,0.92)",
-                        border: "1px solid rgba(148,163,184,0.2)",
-                        borderRadius: 12,
-                        color: "white",
-                      }}
-                      labelStyle={{ color: "#cbd5e1" }}
-                      formatter={(value: any) => [fmtMoney(Number(value)), "Equity"]}
-                    />
-                    <Line type="monotone" dataKey="equity" strokeWidth={2.5} dot={false} stroke="rgba(56,189,248,0.95)" />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
+              <PerformanceChart
+                data={equitySeries.map((e: EquityPoint) => ({ t: e.t, value: e.equity }))}
+                title=""
+                valueLabel="Equity"
+                showFooter={false}
+                className="h-[360px]"
+              />
             </Card>
           </div>
 
@@ -522,7 +574,7 @@ export default function ProfilePage() {
                         </td>
                       </tr>
                     ) : (
-                      filteredHoldings.map((h) => {
+                      filteredHoldings.map((h: any) => {
                         const up = h.pnl >= 0;
                         return (
                           <tr key={h.symbol} className="text-sm">
