@@ -32,32 +32,71 @@ app.add_middleware(
 )
 
 # ======================================================
-# ROUTERS (Current working routers)
+# ROUTERS - Consolidated Structure
 # ======================================================
-from backend.routers.admin_consolidated_router import router as admin_consolidated_router
-from backend.routers.health_router import router as health_router
+
+# NEW: Consolidated domain routers
+from backend.routers.system_router import router as system_router
+from backend.routers.logs_router import router as logs_router
+from backend.routers.bots_router import router as bots_router
+from backend.routers.insights_router_consolidated import router as insights_router
+from backend.routers.admin_router_final import router as admin_router_final
+
+# KEEP: Essential standalone routers
 from backend.routers.events_router import router as events_router
 from backend.routers.unified_cache_router import router as unified_cache_router
-from backend.admin.routes import router as admin_router
-from backend.admin.admin_tools_router import router as admin_tools_router
-from backend.routers.system_run_router import router as system_run_router
 from backend.routers.pnl_dashboard_router import router as pnl_dashboard_router
 
-# Commented out non-existent routers (for future use)
-# from backend.routers.page_data_router import router as page_data_router
-# from backend.routers.settings_consolidated_router import router as settings_consolidated_router
+# KEEP: Additional feature routers (not consolidated per requirements)
+try:
+    from backend.routers.model_router import router as model_router
+except ImportError:
+    model_router = None
+
+try:
+    from backend.routers.testing_router import router as testing_router
+except ImportError:
+    testing_router = None
+
+try:
+    from backend.routers.intraday_router import router as intraday_router
+except ImportError:
+    intraday_router = None
+
+try:
+    from backend.routers.replay_router import router as replay_router
+except ImportError:
+    replay_router = None
+
+try:
+    from backend.routers.page_data_router import router as page_data_router
+except ImportError:
+    page_data_router = None
+
+try:
+    from backend.routers.live_prices_router import router as live_prices_router
+except ImportError:
+    live_prices_router = None
 
 # Include all routers
 ROUTERS = [
-    admin_consolidated_router,
-    health_router,
-    events_router,
-    unified_cache_router,
-    admin_router,
-    admin_tools_router,
-    system_run_router,
-    pnl_dashboard_router,
+    # NEW: Consolidated routers (6 domain routers)
+    system_router,           # /api/system/ (status, health, diagnostics, actions)
+    logs_router,             # /api/logs/ (nightly, intraday, all logs)
+    bots_router,             # /api/bots/ (page, status, configs, signals, equity)
+    insights_router,         # /api/insights/ (boards, predictions, portfolio, metrics)
+    admin_router_final,      # /admin/ (status, settings, replay, tools)
+    
+    # KEEP: Essential routers
+    events_router,           # /api/events/ (SSE streaming)
+    unified_cache_router,    # /api/cache/ (unified cache)
+    pnl_dashboard_router,    # /api/pnl/ (PnL dashboard)
 ]
+
+# Add optional routers if available
+for router in [model_router, testing_router, intraday_router, replay_router, page_data_router, live_prices_router]:
+    if router is not None:
+        ROUTERS.append(router)
 
 for router in ROUTERS:
     app.include_router(router)

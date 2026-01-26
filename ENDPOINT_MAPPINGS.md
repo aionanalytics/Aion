@@ -2,6 +2,33 @@
 
 This document provides a comprehensive mapping of all frontend API calls to their corresponding backend routes.
 
+**Last Updated:** 2026-01-26  
+**Version:** 2.0.0 (Router Consolidation)
+
+## ⚠️ IMPORTANT: Router Consolidation (v2.0.0)
+
+As of v2.0.0, the backend has been refactored from 20+ fragmented routers into **5 consolidated domain routers** plus **9 standalone feature routers**:
+
+### Consolidated Routers (NEW)
+1. **SYSTEM** (`/api/system/`) - status, health, diagnostics, actions
+2. **LOGS** (`/api/logs/`) - all log file access
+3. **BOTS** (`/api/bots/`) - bot data aggregation
+4. **INSIGHTS** (`/api/insights/`) - predictions, metrics, portfolio
+5. **ADMIN** (`/admin/`) - settings, replay, tools
+
+### Standalone Routers (KEPT)
+- `/api/events/` - SSE streaming
+- `/api/cache/` - unified cache
+- `/api/models/` - ML operations
+- `/api/testing/` - endpoint verification
+- `/api/intraday/` - DT operations
+- `/api/replay/` - historical replay
+- `/api/page/` - page bundles
+- `/api/live-prices/` - market data
+- `/api/pnl/` - PnL dashboard
+
+See `backend/routers/registry.py` for complete documentation.
+
 ## Overview
 
 The AION Analytics application uses a Next.js frontend with proxy routes to communicate with two backend services:
@@ -435,9 +462,156 @@ NEXT_PUBLIC_DT_BACKEND_URL=http://localhost:8010
 
 ## Related Documentation
 
+- `backend/routers/registry.py` - Complete router registry and endpoint documentation (v2.0.0)
+- `ROUTER_CONSOLIDATION.md` - Router consolidation guide
 - `/frontend/lib/botsApi.ts` - Bots API client with endpoint documentation
 - `/frontend/lib/api.ts` - Main API client with endpoint documentation
 - `/frontend/lib/dtApi.ts` - DT API client with endpoint documentation
 - `TESTING_API_INTEGRATION.md` - Manual testing guide for API integration
 - `/frontend/app/api/backend/[...path]/route.ts` - Main backend proxy implementation
 - `/frontend/app/api/dt/[...path]/route.ts` - DT backend proxy implementation
+
+---
+
+## Consolidated Router Endpoints (v2.0.0)
+
+### SYSTEM Router (`/api/system/`)
+
+Consolidates: `system_status_router`, `health_router`, `system_run_router`, `diagnostics_router`
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/system/status` | GET | Job monitor + supervisor verdict + coverage |
+| `/api/system/health` | GET | Component health (broker, data, models) |
+| `/api/system/diagnostics` | GET | File stats, path verification |
+| `/api/system/action` | POST | System actions (nightly, train, insights, etc.) |
+
+**Example:**
+```bash
+curl http://localhost:8000/api/system/status
+curl http://localhost:8000/api/system/health
+curl -X POST http://localhost:8000/api/system/action?action=nightly
+```
+
+### LOGS Router (`/api/logs/`)
+
+Consolidates: `nightly_logs_router`, `intraday_logs_router`
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/logs/list?scope={scope}` | GET | List logs (scope: nightly, intraday, scheduler, backend, all) |
+| `/api/logs/{id}` | GET | Read log file content by encoded ID |
+| `/api/logs/nightly/recent` | GET | Recent nightly log entries |
+| `/api/logs/intraday/recent` | GET | Recent intraday log entries |
+| `/api/logs/nightly/{day}` | GET | Nightly log for specific day (YYYY-MM-DD) |
+
+**Backward Compatibility:**
+- `/api/logs/nightly/runs` → `/api/logs/list?scope=nightly`
+- `/api/logs/nightly/run/{run_id}` → `/api/logs/{run_id}`
+
+**Example:**
+```bash
+curl http://localhost:8000/api/logs/list?scope=nightly
+curl http://localhost:8000/api/logs/nightly/recent?lines=50
+```
+
+### BOTS Router (`/api/bots/`)
+
+Consolidates: `bots_page_router`, `bots_hub_router`, `eod_bots_router` (aggregation)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/bots/page` | GET | Unified bundle for UI (swing + intraday) |
+| `/api/bots/overview` | GET | Aggregated status (alias for /page) |
+| `/api/bots/status` | GET | Status for all bots |
+| `/api/bots/configs` | GET | Configurations for all bots |
+| `/api/bots/signals` | GET | Latest signals from all bots |
+| `/api/bots/equity` | GET | Portfolio equity from all bots |
+
+**Example:**
+```bash
+curl http://localhost:8000/api/bots/page
+curl http://localhost:8000/api/bots/status
+```
+
+### INSIGHTS Router (`/api/insights/`)
+
+Consolidates: `insights_router`, `metrics_router`, `portfolio_router`
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/insights/boards/{board}` | GET | Insight board (1w, 2w, 4w, 52w, social, news) |
+| `/api/insights/top-predictions` | GET | Highest-confidence predictions |
+| `/api/insights/portfolio` | GET | Current holdings |
+| `/api/insights/metrics` | GET | Accuracy, calibration, drift metrics |
+| `/api/insights/predictions/latest` | GET | Latest prediction feed (backward compat) |
+
+**Example:**
+```bash
+curl http://localhost:8000/api/insights/boards/1w
+curl http://localhost:8000/api/insights/top-predictions?limit=20
+curl http://localhost:8000/api/insights/metrics
+```
+
+### ADMIN Router (`/admin/`)
+
+Consolidates: `admin_consolidated_router`, `admin/routes.py`, `admin/admin_tools_router.py`, `settings_router`, `swing_replay_router`
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/admin/status` | GET | System health and status |
+| `/admin/logs` | GET | Live system logs |
+| `/admin/settings/current` | GET | View current API keys and settings |
+| `/admin/settings/update` | POST | Update API keys and settings |
+| `/admin/settings/keys/status` | GET | API keys validation status |
+| `/admin/settings/keys/test` | POST | Test API keys validity |
+| `/admin/replay/status` | GET | Swing replay status |
+| `/admin/replay/start` | POST | Start swing historical replay |
+| `/admin/replay/stop` | POST | Stop swing replay |
+| `/admin/replay/reset` | POST | Reset swing replay state |
+| `/admin/login` | POST | Admin authentication |
+| `/admin/tools/clear-locks` | POST | Clear system locks |
+| `/admin/tools/git-pull` | POST | Pull latest code from git |
+| `/admin/tools/refresh-universes` | POST | Refresh trading universes |
+| `/admin/system/restart` | POST | Restart system |
+
+**Example:**
+```bash
+curl http://localhost:8000/admin/status
+curl http://localhost:8000/admin/logs?lines=100
+curl -X POST http://localhost:8000/admin/replay/start?lookback_days=14
+```
+
+---
+
+## Migration Notes (v2.0.0)
+
+### Breaking Changes
+None. All existing endpoints maintain backward compatibility through delegation.
+
+### Deprecated Endpoints
+The following routers are deprecated but their endpoints still work via delegation:
+- `system_status_router.py` → Use `/api/system/status`
+- `health_router.py` → Use `/api/system/health`
+- `nightly_logs_router.py` → Use `/api/logs/list?scope=nightly`
+- Individual bot routers → Use `/api/bots/*` aggregation endpoints
+
+### Frontend Updates Required
+No immediate frontend changes required. However, consider migrating to consolidated endpoints for:
+- Better performance (fewer HTTP requests)
+- Consistent data format
+- Reduced maintenance overhead
+
+**Old Pattern:**
+```typescript
+// Multiple calls
+const status = await fetch('/api/backend/system/status');
+const health = await fetch('/api/backend/health');
+```
+
+**New Pattern:**
+```typescript
+// Single consolidated call
+const system = await fetch('/api/backend/system/status');
+// Contains both status and health data
+```
