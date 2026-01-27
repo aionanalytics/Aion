@@ -446,7 +446,7 @@ def _client_order_id() -> str:
     return f"DT{bid}-{suffix}"[:48]
 
 
-def _poll_order(order_id: str, max_wait_s: float = 4.0) -> Dict[str, Any]:
+def _poll_order(order_id: str, max_wait_s: float = 6.0) -> Dict[str, Any]:
     deadline = time.time() + max_wait_s
     last: Dict[str, Any] = {}
     while time.time() < deadline:
@@ -645,7 +645,7 @@ def submit_order(order: Order, last_price: float | None = None) -> Dict[str, Any
                 return {"status": "rejected", "reason": "alpaca_no_order_id", "raw": created}
 
             oid = str(created["id"])
-            final = _poll_order(oid, max_wait_s=4.0)
+            final = _poll_order(oid, max_wait_s=6.0)
 
             status = str(final.get("status", "")).lower()
             filled_qty = _safe_float(final.get("filled_qty") or 0.0, 0.0)
@@ -653,7 +653,21 @@ def submit_order(order: Order, last_price: float | None = None) -> Dict[str, Any
 
             if filled_qty <= 0:
                 _cancel_order(oid)
-                return {"status": "rejected", "reason": "alpaca_not_filled_fast", "id": oid, "alpaca_status": status}
+                # Capture Alpaca rejection details
+                alpaca_reason = str(final.get("reason") or "")
+                alpaca_message = str(final.get("message") or "")
+                rejection_info = {
+                    "status": "rejected",
+                    "reason": "alpaca_not_filled_fast",
+                    "id": oid,
+                    "alpaca_status": status,
+                    "alpaca_reason": alpaca_reason,
+                    "alpaca_message": alpaca_message,
+                    "alpaca_response": final,
+                }
+                # Log detailed rejection information
+                log(f"[broker_alpaca] ❌ Order rejected: {sym} {side} {qty_req} - status={status}, reason={alpaca_reason}, message={alpaca_message}")
+                return rejection_info
 
             if status != "filled":
                 _cancel_order(oid)
@@ -685,8 +699,40 @@ def submit_order(order: Order, last_price: float | None = None) -> Dict[str, Any
             return out
 
         except Exception as e:
-            log(f"[broker_alpaca] ❌ submit failed for {sym}: {e}")
-            return {"status": "rejected", "reason": "alpaca_error", "detail": str(e)[:500], "bot_id": _bot_id()}
+            error_detail = str(e)[:500]
+            # Try to extract Alpaca error details from exception message
+            alpaca_reason = ""
+            alpaca_message = ""
+            try:
+                # The RuntimeError from _http_json includes the response body
+                # Try to parse it as JSON to extract reason/message
+                error_str = str(e)
+                if "{" in error_str and "}" in error_str:
+                    # Extract JSON portion
+                    start = error_str.index("{")
+                    end = error_str.rindex("}") + 1
+                    json_str = error_str[start:end]
+                    error_json = json.loads(json_str)
+                    if isinstance(error_json, dict):
+                        alpaca_reason = str(error_json.get("reason") or error_json.get("code") or "")
+                        alpaca_message = str(error_json.get("message") or "")
+            except Exception:
+                pass
+            
+            rejection_dict = {
+                "status": "rejected",
+                "reason": "alpaca_error",
+                "detail": error_detail,
+                "bot_id": _bot_id(),
+            }
+            if alpaca_reason:
+                rejection_dict["alpaca_reason"] = alpaca_reason
+            if alpaca_message:
+                rejection_dict["alpaca_message"] = alpaca_message
+            
+            log(f"[broker_alpaca] ❌ submit failed for {sym}: {error_detail}" + 
+                (f" (reason={alpaca_reason}, message={alpaca_message})" if alpaca_reason or alpaca_message else ""))
+            return rejection_dict
 
     # ===== Local simulation fallback =====
     if last_price is None:
