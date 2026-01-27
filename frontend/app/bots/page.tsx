@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 
 import { LineChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { PerformanceChart } from "@/components/charts/PerformanceChart";
@@ -189,68 +190,6 @@ function saveLocal<T>(key: string, value: T) {
   }
 }
 
-// -----------------------------
-// UI bits
-// -----------------------------
-
-const HORIZONS = ["1d", "1w", "1m", "3m", "6m", "1y"] as const;
-type Horizon = (typeof HORIZONS)[number];
-
-function OnOffDot({
-  enabled,
-  onToggle,
-  disabled,
-}: {
-  enabled: boolean;
-  onToggle: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      disabled={!!disabled}
-      aria-label={enabled ? "Bot enabled" : "Bot disabled"}
-      title={enabled ? "Enabled (click to turn off)" : "Disabled (click to turn on)"}
-      className={[
-        "h-10 w-10 rounded-full border transition",
-        "shadow-sm",
-        enabled ? "bg-green-500/80 border-green-400" : "bg-red-500/70 border-red-400",
-        disabled ? "opacity-50 cursor-not-allowed" : "hover:scale-[1.03]",
-      ].join(" ")}
-    />
-  );
-}
-
-function MiniPerfChart({ data }: { data: Array<{ t: string; value: number }> }) {
-  return (
-    <PerformanceChart
-      data={data}
-      valueLabel="Equity"
-      compact={true}
-      className="h-[120px] w-full"
-    />
-  );
-}
-
-function horizonButtons(h: Horizon, setH: (x: Horizon) => void) {
-  return (
-    <div className="flex flex-wrap gap-1">
-      {HORIZONS.map((x) => (
-        <Button
-          key={x}
-          type="button"
-          variant={x === h ? "default" : "outline"}
-          size="sm"
-          className="h-7 px-2 text-xs"
-          onClick={() => setH(x)}
-        >
-          {x.toUpperCase()}
-        </Button>
-      ))}
-    </div>
-  );
-}
 
 function buildFallbackSeries(value?: number): Array<{ t: string; value: number }> {
   const v = clampNum(value, 0);
@@ -480,6 +419,351 @@ function BotRulesPanel({
 }
 
 // -----------------------------
+// Bot category card with tabs
+// -----------------------------
+
+type BotInfo = {
+  botKey: string;
+  statusNode?: any;
+  base: BotDraft;
+  displayName: string;
+  dtMeta?: { realized?: number; unrealized?: number; total?: number; fillsCount?: number };
+};
+
+function BotCategoryCard({
+  title,
+  subtitle,
+  bots,
+  selectedBotKey,
+  onSelectBot,
+  currentBot,
+  botType,
+  apiPrefix,
+}: {
+  title: string;
+  subtitle: string;
+  bots: BotInfo[];
+  selectedBotKey: string;
+  onSelectBot: (key: string) => void;
+  currentBot?: BotInfo;
+  botType: "swing" | "dt";
+  apiPrefix: string;
+}) {
+  if (bots.length === 0) {
+    return (
+      <Card className="border-white/10 bg-white/5">
+        <CardHeader>
+          <CardTitle className="text-xl">{title}</CardTitle>
+          <div className="text-xs text-white/60">{subtitle}</div>
+        </CardHeader>
+        <CardContent className="p-6 text-sm text-white/60">
+          No {botType === "swing" ? "swing" : "day trading"} bots found yet. If you expect them, confirm the backend
+          mounted <code>/bots/page</code>.
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="border-white/10 bg-white/5">
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle className="text-xl">{title}</CardTitle>
+            <div className="text-xs text-white/60 mt-1">{subtitle}</div>
+          </div>
+        </div>
+
+        {/* Bot Tabs */}
+        <div className="mt-4">
+          <Tabs value={selectedBotKey} onValueChange={onSelectBot}>
+            <TabsList className="flex-wrap h-auto">
+              {bots.map((bot) => (
+                <TabsTrigger key={bot.botKey} value={bot.botKey} className="flex items-center gap-2">
+                  <span>{bot.displayName}</span>
+                  <Badge
+                    variant={bot.base.enabled ? "default" : "secondary"}
+                    className={bot.base.enabled ? "bg-green-500/80 text-white" : "bg-red-500/70 text-white"}
+                  >
+                    {bot.base.enabled ? "ON" : "OFF"}
+                  </Badge>
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </Tabs>
+        </div>
+      </CardHeader>
+
+      <CardContent>
+        {currentBot ? (
+          <BotProfile
+            botKey={currentBot.botKey}
+            botType={botType}
+            statusNode={currentBot.statusNode}
+            baseConfig={currentBot.base}
+            displayName={currentBot.displayName}
+            dtMeta={currentBot.dtMeta}
+            apiPrefix={apiPrefix}
+          />
+        ) : (
+          <div className="text-sm text-white/60">Select a bot to view its profile.</div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// -----------------------------
+// Individual bot profile
+// -----------------------------
+
+function BotProfile({
+  botKey,
+  botType,
+  statusNode,
+  baseConfig,
+  displayName,
+  dtMeta,
+  apiPrefix,
+}: {
+  botKey: string;
+  botType: "swing" | "dt";
+  statusNode?: any;
+  baseConfig: BotDraft;
+  displayName: string;
+  dtMeta?: { realized?: number; unrealized?: number; total?: number; fillsCount?: number };
+  apiPrefix: string;
+}) {
+  const storageKey = `aion.bot_rules.${botKey}`;
+  const { draft, dirty, saving, setSaving, setField, reset, setDirty } = useBotDraft(storageKey, baseConfig);
+
+  const [pnlPeriod, setPnlPeriod] = useState<"day" | "week">("day");
+
+  const lastUpdate = statusNode?.last_update ?? undefined;
+  const cash = statusNode?.cash;
+  const invested = statusNode?.invested;
+  const allocated = statusNode?.allocated ?? draft.max_alloc ?? 0;
+  const holdings = statusNode?.holdings_count;
+  const equity = clampNum(statusNode?.equity, clampNum(cash, 0) + clampNum(invested, 0));
+
+  // Get performance data
+  const series = useMemo(() => {
+    const equityCurve = statusNode?.equity_curve;
+    const pnlCurve = statusNode?.pnl_curve;
+    const maybeCurve = equityCurve ?? pnlCurve;
+    return coerceCurve(maybeCurve, equity);
+  }, [statusNode, equity]);
+
+  // Calculate P&L
+  const pnl = useMemo(() => {
+    if (botType === "dt") {
+      return dtMeta?.total ?? 0;
+    }
+    // For swing bots, calculate from equity curve
+    if (series.length >= 2) {
+      const first = series[0].value;
+      const last = series[series.length - 1].value;
+      return last - first;
+    }
+    return 0;
+  }, [botType, dtMeta, series]);
+
+  async function save() {
+    setSaving(true);
+    try {
+      if (botType === "swing") {
+        await apiPostJson(`${apiPrefix}/eod/configs`, { bot_key: botKey, config: draft });
+      } else {
+        await apiPostJson(`${apiPrefix}/intraday/configs`, { bot_key: botKey, config: draft });
+      }
+      setDirty(false);
+    } catch {
+      setDirty(false);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function toggleEnabled() {
+    setField("enabled", !draft.enabled);
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Performance Chart */}
+      <div className="rounded-xl border bg-card/30 p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <div className="text-sm font-semibold">Performance (P&L over time)</div>
+          <Badge variant="secondary" className="text-xs">
+            {displayName}
+          </Badge>
+        </div>
+        <PerformanceChart data={series} valueLabel="Equity" compact={true} className="h-[200px] w-full" />
+      </div>
+
+      {/* Stats and Controls Grid */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        {/* Left Column - Stats */}
+        <div className="space-y-4">
+          {/* P&L Metric with Toggle */}
+          <div className="rounded-xl border bg-card/30 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="text-sm font-semibold">P&L</div>
+              <div className="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant={pnlPeriod === "day" ? "default" : "outline"}
+                  onClick={() => setPnlPeriod("day")}
+                  className="h-7 px-2 text-xs"
+                >
+                  Day
+                </Button>
+                <Button
+                  size="sm"
+                  variant={pnlPeriod === "week" ? "default" : "outline"}
+                  onClick={() => setPnlPeriod("week")}
+                  className="h-7 px-2 text-xs"
+                >
+                  Week
+                </Button>
+              </div>
+            </div>
+            <div className={`text-2xl font-bold ${pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+              {fmtMoney(pnl)}
+            </div>
+            <div className="mt-1 text-xs text-white/60">
+              {pnlPeriod === "day" ? "Today&apos;s" : "This week&apos;s"} performance
+            </div>
+          </div>
+
+          {/* Current Holdings & Status */}
+          <div className="rounded-xl border bg-card/30 p-4">
+            <div className="mb-3 text-sm font-semibold">Quick Stats</div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-lg border bg-background/40 p-3">
+                <div className="text-[11px] text-muted-foreground">Holdings</div>
+                <div className="text-sm font-semibold">{holdings ?? "—"}</div>
+              </div>
+              <div className="rounded-lg border bg-background/40 p-3">
+                <div className="text-[11px] text-muted-foreground">Status</div>
+                <Badge variant={draft.enabled ? "default" : "secondary"} className="mt-1">
+                  {draft.enabled ? "Enabled" : "Disabled"}
+                </Badge>
+              </div>
+              {botType === "swing" ? (
+                <>
+                  <div className="rounded-lg border bg-background/40 p-3">
+                    <div className="text-[11px] text-muted-foreground">Cash</div>
+                    <div className="text-sm font-semibold">{fmtMaybeMoney(cash)}</div>
+                  </div>
+                  <div className="rounded-lg border bg-background/40 p-3">
+                    <div className="text-[11px] text-muted-foreground">Invested</div>
+                    <div className="text-sm font-semibold">{fmtMaybeMoney(invested)}</div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="rounded-lg border bg-background/40 p-3">
+                    <div className="text-[11px] text-muted-foreground">Realized</div>
+                    <div className="text-sm font-semibold">{fmtMaybeMoney(dtMeta?.realized)}</div>
+                  </div>
+                  <div className="rounded-lg border bg-background/40 p-3">
+                    <div className="text-[11px] text-muted-foreground">Unrealized</div>
+                    <div className="text-sm font-semibold">{fmtMaybeMoney(dtMeta?.unrealized)}</div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Right Column - Editable Fields */}
+        <div className="rounded-xl border bg-card/30 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <div className="text-sm font-semibold">Bot Configuration</div>
+            {dirty ? <Badge variant="secondary">Unsaved</Badge> : <Badge variant="outline">Saved</Badge>}
+          </div>
+
+          <div className="space-y-3">
+            {/* Stop Loss */}
+            <div className="space-y-1">
+              <Label className="text-xs">Stop Loss (%)</Label>
+              <Input
+                type="number"
+                step="0.01"
+                value={(draft.stop_loss * 100).toFixed(2)}
+                onChange={(e) => setField("stop_loss", Math.max(0, Number(e.target.value) / 100))}
+                className="h-9"
+              />
+              <div className="text-[11px] text-muted-foreground">{fmtPct(draft.stop_loss)}</div>
+            </div>
+
+            {/* Take Profit */}
+            <div className="space-y-1">
+              <Label className="text-xs">Take Profit (%)</Label>
+              <Input
+                type="number"
+                step="0.01"
+                value={(draft.take_profit * 100).toFixed(2)}
+                onChange={(e) => setField("take_profit", Math.max(0, Number(e.target.value) / 100))}
+                className="h-9"
+              />
+              <div className="text-[11px] text-muted-foreground">{fmtPct(draft.take_profit)}</div>
+            </div>
+
+            {/* Max Allocation */}
+            <div className="space-y-1">
+              <Label className="text-xs">Max Allocation ($)</Label>
+              <Input
+                type="number"
+                value={draft.max_alloc}
+                onChange={(e) => setField("max_alloc", Math.max(0, Number(e.target.value)))}
+                className="h-9"
+              />
+            </div>
+
+            {/* Max Positions */}
+            <div className="space-y-1">
+              <Label className="text-xs">Max Positions</Label>
+              <Input
+                type="number"
+                value={draft.max_positions}
+                onChange={(e) => setField("max_positions", Math.max(0, Math.round(Number(e.target.value))))}
+                className="h-9"
+              />
+            </div>
+
+            {/* Min Confidence (Aggression) */}
+            <div className="space-y-1">
+              <Label className="text-xs">Min Confidence (0-1)</Label>
+              <Input
+                type="number"
+                step="0.01"
+                min="0"
+                max="1"
+                value={draft.aggression.toFixed(2)}
+                onChange={(e) => setField("aggression", Math.min(1, Math.max(0, Number(e.target.value))))}
+                className="h-9"
+              />
+              <div className="text-[11px] text-muted-foreground">
+                {draft.aggression < 0.34 ? "Conservative" : draft.aggression < 0.67 ? "Balanced" : "Aggressive"}
+              </div>
+            </div>
+
+            {/* Save Button */}
+            <div className="pt-2">
+              <Button onClick={save} disabled={saving || !dirty} className="w-full">
+                {saving ? "Saving…" : "Save Configuration"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// -----------------------------
 // Live tape
 // -----------------------------
 
@@ -571,231 +855,6 @@ function LiveIntradayTape({
 // Bot row card
 // -----------------------------
 
-function BotRow({
-  botKey,
-  botType,
-  statusNode,
-  baseConfig,
-  displayName,
-  dtMeta,
-  apiPrefix,
-}: {
-  botKey: string;
-  botType: "swing" | "dt";
-  statusNode?: any;
-  baseConfig: BotDraft;
-  displayName: string;
-  dtMeta?: { realized?: number; unrealized?: number; total?: number; fillsCount?: number };
-  apiPrefix: string; // "" or "/api/backend" (we’ll use it for saves)
-}) {
-  const storageKey = `aion.bot_rules.${botKey}`;
-  const { draft, dirty, saving, setSaving, setField, reset, setDirty } = useBotDraft(storageKey, baseConfig);
-
-  const [h, setH] = useState<Horizon>("1d");
-
-  const lastUpdate = statusNode?.last_update ?? undefined;
-
-  const cash = statusNode?.cash;
-  const invested = statusNode?.invested;
-  const allocated = statusNode?.allocated ?? draft.max_alloc ?? 0;
-  const holdings = statusNode?.holdings_count;
-
-  const equity = clampNum(statusNode?.equity, clampNum(cash, 0) + clampNum(invested, 0));
-
-  const series = useMemo(() => {
-    const equityCurve = statusNode?.equity_curve;
-    const pnlCurve = statusNode?.pnl_curve;
-    const maybeCurve = equityCurve ?? pnlCurve;
-    
-    // Debug logging for chart data (for debugging data flow issues)
-    // TODO: Consider removing or gating behind debug flag for production
-    console.log(`[BotRow:${botKey}] Chart data source:`, {
-      hasEquityCurve: !!equityCurve,
-      hasPnlCurve: !!pnlCurve,
-      usingSource: equityCurve ? 'equity_curve' : pnlCurve ? 'pnl_curve' : 'none',
-      curveLength: Array.isArray(maybeCurve) ? maybeCurve.length : 0,
-      fallbackEquity: equity
-    });
-    
-    const result = coerceCurve(maybeCurve, equity);
-    
-    console.log(`[BotRow:${botKey}] After coerceCurve:`, {
-      resultLength: result.length,
-      isFallback: !Array.isArray(maybeCurve) || maybeCurve.length === 0,
-      firstPoint: result[0],
-      lastPoint: result[result.length - 1]
-    });
-    
-    return result;
-  }, [statusNode, equity, botKey]);
-
-  async function save() {
-    setSaving(true);
-    try {
-      // try the mounted prefix first
-      if (botType === "swing") {
-        await apiPostJson(`${apiPrefix}/eod/configs`, { bot_key: botKey, config: draft });
-      } else {
-        await apiPostJson(`${apiPrefix}/intraday/configs`, { bot_key: botKey, config: draft });
-      }
-      setDirty(false);
-    } catch {
-      // keep local rules even if backend doesn't support it
-      setDirty(false);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  function toggleEnabled() {
-    setField("enabled", !draft.enabled);
-  }
-
-  const riskLabel = draft.stop_loss <= 0.03 ? "Tight" : draft.stop_loss <= 0.07 ? "Normal" : "Loose";
-
-  return (
-    <Card className="border-white/10 bg-white/5">
-      <CardHeader className="pb-3">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-[240px]">
-            <CardTitle className="text-xl">{displayName}</CardTitle>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-              <Badge variant="outline">{botType === "swing" ? "SWING" : "DAY"}</Badge>
-              <span className="inline-flex items-center gap-1">
-                <Clock className="h-3.5 w-3.5" />
-                {lastUpdate ? lastUpdate : "No update yet"}
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <Activity className="h-3.5 w-3.5" />
-                Equity {fmtMoney(equity)}
-              </span>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">{horizonButtons(h, setH)}</div>
-        </div>
-      </CardHeader>
-
-      <CardContent className="pt-0">
-        <div className="grid gap-4 lg:grid-cols-[360px_240px_1fr_56px] items-stretch">
-          <div className="rounded-xl border bg-card/30 p-4">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="text-sm font-semibold">Performance</div>
-              <Badge variant="secondary" className="text-xs">
-                {h.toUpperCase()}
-              </Badge>
-            </div>
-            <MiniPerfChart data={series} />
-            <div className="mt-2 text-[11px] text-muted-foreground">
-              Chart is per-horizon. Day bots reset daily; swing bots drift with horizon.
-            </div>
-          </div>
-
-          <div className="rounded-xl border bg-card/30 p-4">
-            <div className="mb-3 flex items-center gap-2">
-              <DollarSign className="h-4 w-4 text-muted-foreground" />
-              <div className="text-sm font-semibold">Quick Read</div>
-            </div>
-
-            {botType === "dt" ? (
-              <div className="space-y-3">
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="rounded-lg border bg-background/40 p-3">
-                    <div className="text-[11px] text-muted-foreground">Realized</div>
-                    <div className="text-sm font-semibold">{fmtMaybeMoney(dtMeta?.realized)}</div>
-                  </div>
-                  <div className="rounded-lg border bg-background/40 p-3">
-                    <div className="text-[11px] text-muted-foreground">Unrealized</div>
-                    <div className="text-sm font-semibold">{fmtMaybeMoney(dtMeta?.unrealized)}</div>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="rounded-lg border bg-background/40 p-3">
-                    <div className="text-[11px] text-muted-foreground">Total PnL</div>
-                    <div className="text-sm font-semibold">{fmtMaybeMoney(dtMeta?.total)}</div>
-                  </div>
-                  <div className="rounded-lg border bg-background/40 p-3">
-                    <div className="text-[11px] text-muted-foreground">Fills</div>
-                    <div className="text-sm font-semibold">{dtMeta?.fillsCount ?? "—"}</div>
-                  </div>
-                </div>
-
-                <div className="rounded-lg border bg-background/40 p-3">
-                  <div className="mb-2 flex items-center gap-2">
-                    <Shield className="h-4 w-4 text-muted-foreground" />
-                    <div className="text-xs font-semibold">Risk quick read</div>
-                  </div>
-                  <div className="flex flex-wrap gap-2 text-xs">
-                    <Badge variant="outline">SL {fmtPct(draft.stop_loss)}</Badge>
-                    <Badge variant="outline">TP {fmtPct(draft.take_profit)}</Badge>
-                    <Badge variant="secondary">{riskLabel}</Badge>
-                    <Badge variant="secondary">Agg {fmtPct(draft.aggression)}</Badge>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="rounded-lg border bg-background/40 p-3">
-                    <div className="text-[11px] text-muted-foreground">Available</div>
-                    <div className="text-sm font-semibold">{fmtMaybeMoney(cash)}</div>
-                  </div>
-                  <div className="rounded-lg border bg-background/40 p-3">
-                    <div className="text-[11px] text-muted-foreground">Invested</div>
-                    <div className="text-sm font-semibold">{fmtMaybeMoney(invested)}</div>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="rounded-lg border bg-background/40 p-3">
-                    <div className="text-[11px] text-muted-foreground">Allocated</div>
-                    <div className="text-sm font-semibold">{fmtMoney(allocated)}</div>
-                  </div>
-                  <div className="rounded-lg border bg-background/40 p-3">
-                    <div className="text-[11px] text-muted-foreground">Holdings</div>
-                    <div className="text-sm font-semibold">{holdings ?? "—"}</div>
-                  </div>
-                </div>
-
-                <div className="rounded-lg border bg-background/40 p-3">
-                  <div className="mb-2 flex items-center gap-2">
-                    <Shield className="h-4 w-4 text-muted-foreground" />
-                    <div className="text-xs font-semibold">Risk quick read</div>
-                  </div>
-                  <div className="flex flex-wrap gap-2 text-xs">
-                    <Badge variant="outline">SL {fmtPct(draft.stop_loss)}</Badge>
-                    <Badge variant="outline">TP {fmtPct(draft.take_profit)}</Badge>
-                    <Badge variant="secondary">{riskLabel}</Badge>
-                    <Badge variant="secondary">Agg {fmtPct(draft.aggression)}</Badge>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <BotRulesPanel
-            botKey={botKey}
-            botType={botType}
-            draft={draft}
-            setField={setField}
-            dirty={dirty}
-            saving={saving}
-            onSave={save}
-            onReset={() => {
-              reset();
-              setDirty(true);
-            }}
-          />
-
-          <div className="flex items-start justify-center pt-2">
-            <OnOffDot enabled={!!draft.enabled} onToggle={toggleEnabled} disabled={saving} />
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
 
 // -----------------------------
 // Page
@@ -937,7 +996,29 @@ export default function BotsPage() {
     });
   }, [intradayPnl, dtUpdatedAt, fillsArr.length]);
 
+
   const bg = "min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-black text-white";
+
+  // State for selected bots in each category
+  const [selectedSwingBot, setSelectedSwingBot] = useState<string>("");
+  const [selectedDtBot, setSelectedDtBot] = useState<string>("");
+
+  // Update selected bot when bots list changes
+  useEffect(() => {
+    if (swingBots.length > 0 && !selectedSwingBot) {
+      setSelectedSwingBot(swingBots[0].botKey);
+    }
+  }, [swingBots, selectedSwingBot]);
+
+  useEffect(() => {
+    if (dtBots.length > 0 && !selectedDtBot) {
+      setSelectedDtBot(dtBots[0].botKey);
+    }
+  }, [dtBots, selectedDtBot]);
+
+  // Get currently selected bots
+  const currentSwingBot = swingBots.find(b => b.botKey === selectedSwingBot);
+  const currentDtBot = dtBots.find(b => b.botKey === selectedDtBot);
 
   return (
     <main className={bg}>
@@ -945,7 +1026,7 @@ export default function BotsPage() {
         <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
           <div>
             <h1 className="text-3xl font-bold">Bots</h1>
-            <p className="text-sm text-white/60">Toggle bots on/off, tune rules, and watch per-horizon performance.</p>
+            <p className="text-sm text-white/60">Manage individual bot profiles with real-time P&amp;L charts and tunable settings.</p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -975,66 +1056,34 @@ export default function BotsPage() {
           <div className="mb-6 rounded-xl border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-200">{err}</div>
         ) : null}
 
-        {/* SWING BOTS */}
-        <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Swing bots</h2>
-            <div className="text-xs text-white/60">
-              {eodStatus?.running ? "Engine: running" : "Engine: idle"} • {swingBots.length} bots
-            </div>
-          </div>
+        <div className="space-y-6">
+          {/* SWING BOTS CARD */}
+          <BotCategoryCard
+            title="Swing (EOD) Bots"
+            subtitle={`${eodStatus?.running ? "Engine: running" : "Engine: idle"} • ${swingBots.length} bots`}
+            bots={swingBots}
+            selectedBotKey={selectedSwingBot}
+            onSelectBot={setSelectedSwingBot}
+            currentBot={currentSwingBot}
+            botType="swing"
+            apiPrefix={apiPrefixRef.current}
+          />
 
-          <div className="space-y-4">
-            {swingBots.map((b) => (
-              <BotRow
-                key={b.botKey}
-                botKey={b.botKey}
-                botType="swing"
-                statusNode={b.statusNode}
-                baseConfig={b.base}
-                displayName={b.displayName}
-                apiPrefix={apiPrefixRef.current}
-              />
-            ))}
-            {!swingBots.length ? (
-              <Card className="border-white/10 bg-white/5">
-                <CardContent className="p-6 text-sm text-white/60">
-                  No swing bots found yet. If you expect them, confirm the backend mounted <code>/bots/page</code>.
-                </CardContent>
-              </Card>
-            ) : null}
-          </div>
-        </section>
-
-        <Separator className="my-8 bg-white/10" />
-
-        {/* DAY TRADING BOTS */}
-        <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Day-trading bots</h2>
-            <div className="text-xs text-white/60">{dtBots.length} bots • intraday snapshot</div>
-          </div>
-
-          <div className="space-y-4">
-            {dtBots.map((b) => (
-              <BotRow
-                key={b.botKey}
-                botKey={b.botKey}
-                botType="dt"
-                statusNode={b.statusNode}
-                baseConfig={b.base}
-                displayName={b.displayName}
-                dtMeta={b.dtMeta}
-                apiPrefix={apiPrefixRef.current}
-              />
-            ))}
-          </div>
-
-          <LiveIntradayTape fills={fillsArr} signals={signalsArr} updatedAt={dtUpdatedAt} />
-        </section>
+          {/* DAY TRADING BOTS CARD */}
+          <BotCategoryCard
+            title="DT (Intraday) Bots"
+            subtitle={`${dtBots.length} bots • intraday snapshot`}
+            bots={dtBots}
+            selectedBotKey={selectedDtBot}
+            onSelectBot={setSelectedDtBot}
+            currentBot={currentDtBot}
+            botType="dt"
+            apiPrefix={apiPrefixRef.current}
+          />
+        </div>
 
         <div className="mt-10 text-xs text-white/40">
-          Note: Save is best-effort. If your backend doesn’t expose config-update endpoints yet, the page still persists
+          Note: Save is best-effort. If your backend doesn&apos;t expose config-update endpoints yet, the page still persists
           rules locally.
         </div>
       </div>
