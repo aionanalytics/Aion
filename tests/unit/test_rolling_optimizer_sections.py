@@ -3,7 +3,7 @@ Unit tests for rolling optimizer section-based updates.
 
 Tests:
 1. Swing section updates don't affect DT section
-2. DT section updates don't affect swing section  
+2. DT section updates don't affect swing section
 3. Atomic writes work correctly
 4. File format is correct
 """

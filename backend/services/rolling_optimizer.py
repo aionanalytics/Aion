@@ -35,11 +35,6 @@ try:
 except ImportError:
     from backend.config import PATHS, TIMEZONE  # type: ignore
 
-try:
-    from config import DT_PATHS
-except ImportError:
-    DT_PATHS = {}  # type: ignore
-
 
 class RollingOptimizer:
     """
@@ -80,14 +75,11 @@ class RollingOptimizer:
         if section == "swing":
             # Swing reads from rolling_body (nightly predictions)
             self.rolling_input = da_brains / "rolling_body.json.gz"
-        elif section == "dt":
+        else:  # section == "dt" - validation ensures this is the only other option
             # DT reads from rolling_intraday (intraday positions)
             intraday_dir = da_brains / "intraday"
             intraday_dir.mkdir(parents=True, exist_ok=True)
             self.rolling_input = intraday_dir / "rolling_intraday.json.gz"
-        else:
-            # This should never happen due to validation above, but just in case
-            raise ValueError(f"Invalid section: {section}")
         
         # Outputs: unified optimized file with sections
         self.rolling_optimized = da_brains / "rolling_optimized.json.gz"
