@@ -49,7 +49,7 @@ class RollingOptimizer:
         da_brains.mkdir(parents=True, exist_ok=True)
         
         # Input: raw rolling file
-        self.rolling_input = da_brains / "rolling_brain.json.gz"
+        self.rolling_input = da_brains / "rolling_body.json.gz"
         
         # Outputs: optimized frontend files
         self.rolling_optimized = da_brains / "rolling_optimized.json.gz"
