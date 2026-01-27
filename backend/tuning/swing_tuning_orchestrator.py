@@ -289,6 +289,26 @@ class TuningOrchestrator:
                 )
                 append_tuning_decision(decision)
     
+    def _get_current_regime(self, outcomes: List[Dict[str, Any]]) -> str:
+        """
+        Determine current market regime from recent outcomes.
+        
+        Args:
+            outcomes: Recent trade outcomes
+        
+        Returns:
+            Current regime (bull/bear/chop/stress)
+        """
+        if not outcomes:
+            return "bull"  # Default fallback
+        
+        # Use most recent outcome's exit regime as current regime
+        recent_outcomes = sorted(outcomes, key=lambda o: o.get("exit_ts", ""), reverse=True)
+        if recent_outcomes:
+            return recent_outcomes[0].get("regime_exit", "bull")
+        
+        return "bull"
+    
     def _run_position_tuning(
         self,
         bot_key: str,
@@ -303,8 +323,8 @@ class TuningOrchestrator:
             "max_weight_per_name": config.get("max_weight_per_name", 0.15)
         }
         
-        # Optimize for primary regime (or all if regime-aware)
-        regime = "bull"  # Could be made dynamic based on current regime
+        # Get current regime from recent outcomes
+        regime = self._get_current_regime(outcomes)
         
         results = self.position_tuner.optimize_all_sizing(
             bot_key=bot_key,
@@ -350,7 +370,8 @@ class TuningOrchestrator:
             "take_profit_pct": config.get("take_profit_pct", 0.10)
         }
         
-        regime = "bull"  # Could be dynamic
+        # Get current regime from recent outcomes
+        regime = self._get_current_regime(outcomes)
         
         results = self.exit_optimizer.optimize_all_exits(
             bot_key=bot_key,

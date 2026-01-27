@@ -181,11 +181,14 @@ class TuningValidator:
         
         # Use t-distribution for small samples
         # For 95% confidence and n>30, t ≈ 1.96 (z-score)
-        # For smaller n, use approximation
+        # For smaller n, use simplified approximation: t ≈ 2.0 + (1.0 / sqrt(n))
+        # Note: This is a conservative approximation. For production use with
+        # critical financial decisions, consider using scipy.stats.t.ppf for
+        # exact t-scores, especially when n < 30.
         if n > 30:
             t_score = 1.96  # For 95% confidence
         else:
-            # Simplified t-score approximation
+            # Simplified t-score approximation (conservative)
             t_score = 2.0 + (1.0 / math.sqrt(n))
         
         margin = t_score * std_error

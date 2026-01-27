@@ -36,7 +36,7 @@ import json
 import os
 import uuid
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -284,8 +284,8 @@ def load_recent_outcomes(
         return []
 
 
-# Needed for date filtering
-from datetime import timedelta
+# Needed for date filtering - already imported at top
+# from datetime import timedelta
 
 
 def get_outcome_statistics(
