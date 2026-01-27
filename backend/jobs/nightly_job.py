@@ -50,7 +50,7 @@ SUMMARY_FILE = PATHS["logs"] / "nightly" / "last_nightly_summary.json"
 # Recent-run guard
 # -----------------------------
 # Default: skip if the last run finished within N hours. Override with AION_MIN_HOURS_BETWEEN_NIGHTLY=0 to disable.
-MIN_HOURS_BETWEEN_RUNS = int(os.getenv("AION_MIN_HOURS_BETWEEN_NIGHTLY", "8") or "8")
+MIN_HOURS_BETWEEN_RUNS = int(os.getenv("AION_MIN_HOURS_BETWEEN_NIGHTLY", "0") or "0")
 
 
 def _recent_nightly_ran_within(hours: int) -> bool:
