@@ -48,6 +48,8 @@ from dt_backend.core.constants_dt import (
     REGIME_EXPOSURE,
 )
 
+from backend.tuning.swing_profile_loader import load_swing_profile
+
 # Import alerting module for Slack notifications
 try:
     from backend.monitoring.alerting import alert_swing
@@ -124,7 +126,6 @@ def apply_swing_env_overrides(cfg: "SwingBotConfig") -> "SwingBotConfig":
     cfg.ev_power = max(0.25, min(3.0, float(cfg.ev_power)))
 
     return cfg
-from backend.tuning.swing_profile_loader import load_swing_profile
 
 # ---------------------------------------------------------------------
 # Config & logging
