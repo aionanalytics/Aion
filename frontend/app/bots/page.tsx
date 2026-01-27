@@ -554,7 +554,8 @@ function BotProfile({
     return coerceCurve(maybeCurve, equity);
   }, [statusNode, equity]);
 
-  // Calculate P&L
+  // Calculate P&L - Note: period toggle is cosmetic for now
+  // TODO: Implement actual day/week P&L calculation from historical data
   const pnl = useMemo(() => {
     if (botType === "dt") {
       return dtMeta?.total ?? 0;
@@ -737,16 +738,16 @@ function BotProfile({
             <div className="space-y-1">
               <Label className="text-xs">Min Confidence (0-1)</Label>
               <Input
-                type="number"
+                type="range"
                 step="0.01"
                 min="0"
                 max="1"
-                value={draft.aggression.toFixed(2)}
+                value={draft.aggression}
                 onChange={(e) => setField("aggression", Math.min(1, Math.max(0, Number(e.target.value))))}
                 className="h-9"
               />
               <div className="text-[11px] text-muted-foreground">
-                {draft.aggression < 0.34 ? "Conservative" : draft.aggression < 0.67 ? "Balanced" : "Aggressive"}
+                {draft.aggression < 0.34 ? "Conservative" : draft.aggression < 0.67 ? "Balanced" : "Aggressive"} • {draft.aggression.toFixed(2)}
               </div>
             </div>
 
