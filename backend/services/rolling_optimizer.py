@@ -64,7 +64,13 @@ class RollingOptimizer:
             section: Which section to update ("swing" or "dt")
                 - "swing": Reads from rolling_body.json.gz, updates swing/swing_bots sections
                 - "dt": Reads from rolling_intraday.json.gz, updates dt section
+        
+        Raises:
+            ValueError: If section is not "swing" or "dt"
         """
+        if section not in ("swing", "dt"):
+            raise ValueError(f"Invalid section: {section}. Must be 'swing' or 'dt'")
+        
         self.section = section
         
         da_brains = Path(PATHS.get("da_brains", "da_brains"))
@@ -74,11 +80,14 @@ class RollingOptimizer:
         if section == "swing":
             # Swing reads from rolling_body (nightly predictions)
             self.rolling_input = da_brains / "rolling_body.json.gz"
-        else:  # section == "dt"
+        elif section == "dt":
             # DT reads from rolling_intraday (intraday positions)
             intraday_dir = da_brains / "intraday"
             intraday_dir.mkdir(parents=True, exist_ok=True)
             self.rolling_input = intraday_dir / "rolling_intraday.json.gz"
+        else:
+            # This should never happen due to validation above, but just in case
+            raise ValueError(f"Invalid section: {section}")
         
         # Outputs: unified optimized file with sections
         self.rolling_optimized = da_brains / "rolling_optimized.json.gz"
@@ -430,7 +439,13 @@ def optimize_rolling_data(section: Literal["swing", "dt"] = "swing") -> Dict[str
 if __name__ == "__main__":
     # Allow running standalone for testing
     import sys
+    
+    # Validate and parse section argument
     section = sys.argv[1] if len(sys.argv) > 1 else "swing"
+    if section not in ("swing", "dt"):
+        print(f"Error: Invalid section '{section}'. Must be 'swing' or 'dt'")
+        sys.exit(1)
+    
     print(f"[RollingOptimizer] Starting rolling file optimization for section: {section}...")
     result = optimize_rolling_data(section=section)
     print(f"[RollingOptimizer] Result: {json.dumps(result, indent=2)}")

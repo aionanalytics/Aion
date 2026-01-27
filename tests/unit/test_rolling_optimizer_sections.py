@@ -102,6 +102,14 @@ def test_swing_section_initialization(temp_dir, mock_paths):
 
 
 @pytest.mark.unit
+def test_invalid_section_raises_error(temp_dir, mock_paths):
+    """Test that invalid section raises ValueError."""
+    with patch("backend.services.rolling_optimizer.PATHS", mock_paths):
+        with pytest.raises(ValueError, match="Invalid section"):
+            RollingOptimizer(section="invalid")
+
+
+@pytest.mark.unit
 def test_dt_section_initialization(temp_dir, mock_paths):
     """Test that DT section initializes with rolling_intraday input."""
     with patch("backend.services.rolling_optimizer.PATHS", mock_paths):
