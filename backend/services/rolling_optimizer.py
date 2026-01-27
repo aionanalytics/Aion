@@ -3,7 +3,7 @@
 Rolling File Optimizer — AION Analytics
 
 Background service that:
-1. Streams rolling_intraday.json.gz (500MB peak RAM, not 2GB)
+1. Streams rolling_body.json.gz (500MB peak RAM, not 2GB)
 2. Extracts ONLY what frontend needs:
    - Top 200-300 symbols by confidence
    - Symbol, prediction, confidence, last_price, sentiment
@@ -49,7 +49,7 @@ class RollingOptimizer:
         da_brains.mkdir(parents=True, exist_ok=True)
         
         # Input: raw rolling file
-        self.rolling_input = da_brains / "rolling_brain.json.gz"
+        self.rolling_input = da_brains / "rolling_body.json.gz"
         
         # Outputs: optimized frontend files
         self.rolling_optimized = da_brains / "rolling_optimized.json.gz"
