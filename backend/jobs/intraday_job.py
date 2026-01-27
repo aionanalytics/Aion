@@ -7,6 +7,7 @@ Steps:
     2. Update dt_backend rolling
     3. Run intraday runner (context → features → scoring → policy → execution)
     4. Write logs + snapshot
+    5. Update rolling optimizer (DT section only)
 """
 
 from __future__ import annotations
@@ -49,12 +50,23 @@ def run_intraday_job() -> dict:
     # 2. Run dt_backend intraday cycle
     cycle_res = run_intraday_cycle()
 
-    # 3. Write snapshot log
+    # 3. Update rolling optimizer (DT section only)
+    optimizer_res = {}
+    try:
+        from backend.services.rolling_optimizer import optimize_rolling_data
+        optimizer_res = optimize_rolling_data(section="dt")
+        log(f"[intraday_job] rolling optimizer updated DT section: {optimizer_res.get('status')}")
+    except Exception as e:
+        log(f"[intraday_job] ⚠️ rolling optimizer failed (continuing): {e}")
+        optimizer_res = {"status": "error", "error": str(e)}
+
+    # 4. Write snapshot log
     logdir = _log_dir()
     snap = {
         "ts": ts,
         "fetch": fetch_res,
         "cycle": cycle_res,
+        "optimizer": optimizer_res,
     }
     (logdir / "last_run.json").write_text(json.dumps(snap, indent=2), encoding="utf-8")
 

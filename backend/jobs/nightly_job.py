@@ -675,10 +675,11 @@ def run_nightly_job(
         try:
             _require(optimize_rolling_data, "backend.services.rolling_optimizer.optimize_rolling_data")
             
-            res = optimize_rolling_data()
+            # Update swing section only - DT section updated by intraday job
+            res = optimize_rolling_data(section="swing")
             _record_ok(summary, key, res, t0)
             _write_summary(summary)
-            log("✅ Rolling data optimization complete.")
+            log("✅ Rolling data optimization complete (swing section).")
         except Exception as e:
             _record_err(summary, key, e, t0)
             _write_summary(summary)
