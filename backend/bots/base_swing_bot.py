@@ -124,7 +124,6 @@ def apply_swing_env_overrides(cfg: "SwingBotConfig") -> "SwingBotConfig":
     cfg.ev_power = max(0.25, min(3.0, float(cfg.ev_power)))
 
     return cfg
-from backend.bots.brains.swing_brain_v2 import rank_universe_v2
 from backend.tuning.swing_profile_loader import load_swing_profile
 
 # ---------------------------------------------------------------------
@@ -1703,19 +1702,16 @@ Portfolio:
         except Exception:
             tier_params = {}
 
-        ranked = rank_universe_v2(
+        # Phase 7: Use build_ai_ranked_universe for EV-based ranking with P(hit) calibration
+        # This ensures single source of truth and proper rejection tracking
+        log(f"[{self.cfg.bot_key}] Using build_ai_ranked_universe for symbol ranking")
+        ranked = self.build_ai_ranked_universe(
             rolling=rolling,
             insights=insights,
-            horizon=self.cfg.horizon,
-            conf_threshold=self.cfg.conf_threshold,
-            tier_params=tier_params if isinstance(tier_params, dict) and tier_params else None,
         )
         
-        # Track universe stats for summary (approximate since rank_universe_v2 doesn't return rejection details)
-        self._last_universe_analyzed = len(rolling) - 1 if "_GLOBAL" in rolling else len(rolling)  # Exclude _GLOBAL
-        self._last_universe_qualified = len(ranked)
-        # Note: Detailed rejection counts come from build_ai_ranked_universe if used,
-        # otherwise we'll show simplified stats in the summary
+        # Universe stats and rejection counts are tracked by build_ai_ranked_universe
+        # and stored in self._last_universe_analyzed, self._last_universe_qualified, self._last_rejection_counts
         
         target_weights = self.construct_target_weights(ranked)
 
