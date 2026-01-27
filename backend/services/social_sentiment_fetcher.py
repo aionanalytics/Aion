@@ -56,6 +56,14 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _safe_float(x: Any, default: float = 0.0) -> float:
+    """Safely convert value to float with default fallback."""
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return default
+
+
 # =====================================================================
 # Heuristics for sentiment
 # =====================================================================
