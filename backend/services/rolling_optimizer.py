@@ -3,7 +3,7 @@
 Rolling File Optimizer — AION Analytics
 
 Background service that:
-1. Streams rolling_intraday.json.gz (500MB peak RAM, not 2GB)
+1. Streams rolling_body.json.gz (500MB peak RAM, not 2GB)
 2. Extracts ONLY what frontend needs:
    - Top 200-300 symbols by confidence
    - Symbol, prediction, confidence, last_price, sentiment
