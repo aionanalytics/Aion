@@ -1667,8 +1667,8 @@ Portfolio:
             pass
 
         insights = self.load_insights()
-        # Phase 5: regime playbook profile (soft gates + tier thresholds)
-        tier_params: dict = {}
+        # Phase 5: regime playbook profile (conf_threshold adjustments)
+        # Note: build_ai_ranked_universe uses self.cfg.conf_threshold internally
         try:
             g = rolling.get("_GLOBAL") if isinstance(rolling.get("_GLOBAL"), dict) else {}
             reg_label = str(
@@ -1694,13 +1694,8 @@ Portfolio:
 
                 g["swing_playbook_profile"] = {"name": str(playbook.get("label") or ""), "ts": _now_iso()}
                 rolling["_GLOBAL"] = g
-
-                if isinstance(playbook.get("tier_overrides"), dict):
-                    tier_params["tier_overrides"] = playbook.get("tier_overrides")
-                if playbook.get("max_vol") is not None:
-                    tier_params["max_vol"] = float(playbook.get("max_vol"))
         except Exception:
-            tier_params = {}
+            pass
 
         # Phase 7: Use build_ai_ranked_universe for EV-based ranking with P(hit) calibration
         # This ensures single source of truth and proper rejection tracking
