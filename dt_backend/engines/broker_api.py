@@ -29,6 +29,7 @@ from typing import Any, Dict
 
 import json
 import os
+import re
 import time
 import uuid
 import urllib.error
@@ -706,15 +707,16 @@ def submit_order(order: Order, last_price: float | None = None) -> Dict[str, Any
             try:
                 # The RuntimeError from _http_json includes the response body
                 # Try to parse it as JSON to extract reason/message
+                # Look for JSON pattern after the HTTP status code (e.g., "403: {...}")
                 error_str = str(e)
-                if "{" in error_str and "}" in error_str:
-                    # Extract JSON portion
-                    start = error_str.index("{")
-                    end = error_str.rindex("}") + 1
-                    json_str = error_str[start:end]
+                # Match JSON after status code pattern like "403: {...}"
+                json_match = re.search(r'\d{3}:\s*(\{.*\})\s*$', error_str)
+                if json_match:
+                    json_str = json_match.group(1)
                     error_json = json.loads(json_str)
                     if isinstance(error_json, dict):
-                        alpaca_reason = str(error_json.get("reason") or error_json.get("code") or "")
+                        # Alpaca uses 'reason' field primarily, 'code' is numeric error code
+                        alpaca_reason = str(error_json.get("reason") or "")
                         alpaca_message = str(error_json.get("message") or "")
             except Exception:
                 pass
