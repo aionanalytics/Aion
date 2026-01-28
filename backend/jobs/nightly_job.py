@@ -704,7 +704,8 @@ def run_nightly_job(
             _require(optimize_rolling_data, "backend.services.rolling_optimizer.optimize_rolling_data")
             
             # Update swing section only - DT section updated by intraday job
-            res = optimize_rolling_data(section="swing")
+            # Pass in-memory rolling data to avoid race condition with file I/O
+            res = optimize_rolling_data(section="swing", rolling_data=rolling)
             _record_ok(summary, key, res, t0)
             _write_summary(summary)
             log("✅ Rolling data optimization complete (swing section).")

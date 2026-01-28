@@ -51,7 +51,7 @@ class RollingOptimizer:
     - section="dt": Updates only dt section from rolling_intraday.json.gz
     """
     
-    def __init__(self, section: Literal["swing", "dt"] = "swing"):
+    def __init__(self, section: Literal["swing", "dt"] = "swing", rolling_data: Optional[Dict[str, Any]] = None):
         """
         Initialize optimizer with paths.
         
@@ -59,6 +59,8 @@ class RollingOptimizer:
             section: Which section to update ("swing" or "dt")
                 - "swing": Reads from rolling_body.json.gz, updates swing/swing_bots sections
                 - "dt": Reads from rolling_intraday.json.gz, updates dt section
+            rolling_data: Optional in-memory rolling data dict to use instead of reading from disk.
+                This prevents race conditions when called immediately after save_rolling().
         
         Raises:
             ValueError: If section is not "swing" or "dt"
@@ -67,6 +69,7 @@ class RollingOptimizer:
             raise ValueError(f"Invalid section: {section}. Must be 'swing' or 'dt'")
         
         self.section = section
+        self.rolling_data = rolling_data
         
         da_brains = Path(PATHS.get("da_brains", "da_brains"))
         da_brains.mkdir(parents=True, exist_ok=True)
@@ -261,16 +264,20 @@ class RollingOptimizer:
         """
         predictions = []
         
-        if not self.rolling_input.exists():
-            return predictions
-        
         try:
-            # Stream and parse JSON incrementally to avoid loading entire file
-            with gzip.open(self.rolling_input, "rt", encoding="utf-8") as f:
-                # For now, load full file but track memory
-                # TODO: Implement true streaming with ijson for >1GB files
-                content = f.read()
-                data = json.loads(content)
+            # Use in-memory data if provided, otherwise read from disk
+            if self.rolling_data is not None:
+                data = self.rolling_data
+            else:
+                if not self.rolling_input.exists():
+                    return predictions
+                
+                # Stream and parse JSON incrementally to avoid loading entire file
+                with gzip.open(self.rolling_input, "rt", encoding="utf-8") as f:
+                    # For now, load full file but track memory
+                    # TODO: Implement true streaming with ijson for >1GB files
+                    content = f.read()
+                    data = json.loads(content)
             
             # Extract predictions from rolling data
             if isinstance(data, dict):
@@ -412,7 +419,7 @@ class RollingOptimizer:
         return {"holdings": holdings, "timestamp": datetime.now(TIMEZONE).isoformat()}
 
 
-def optimize_rolling_data(section: Literal["swing", "dt"] = "swing") -> Dict[str, Any]:
+def optimize_rolling_data(section: Literal["swing", "dt"] = "swing", rolling_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Main entry point for rolling optimization with section isolation.
     
@@ -420,11 +427,15 @@ def optimize_rolling_data(section: Literal["swing", "dt"] = "swing") -> Dict[str
         section: Which section to update ("swing" or "dt")
             - "swing": Updates swing/swing_bots sections from rolling_body.json.gz (nightly)
             - "dt": Updates dt section from rolling_intraday.json.gz (intraday)
+        rolling_data: Optional in-memory rolling data dict to use instead of reading from disk.
+            This prevents race conditions when called immediately after save_rolling().
+            If provided, the optimizer will use this data directly.
+            If not provided, it will read from the appropriate file on disk.
     
     Returns:
         Status dict with processing stats.
     """
-    optimizer = RollingOptimizer(section=section)
+    optimizer = RollingOptimizer(section=section, rolling_data=rolling_data)
     return optimizer.stream_and_optimize()
 
 
