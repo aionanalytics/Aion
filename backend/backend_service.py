@@ -31,6 +31,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Authentication middleware (disabled by default, enable with AUTH_ENABLED=1)
+AUTH_ENABLED = os.getenv("AUTH_ENABLED", "0") == "1"
+if AUTH_ENABLED:
+    try:
+        from backend.middleware.auth_middleware import AuthMiddleware
+        app.add_middleware(AuthMiddleware)
+        print("[Backend] ✅ Authentication middleware enabled")
+    except Exception as e:
+        print(f"[Backend] ⚠️  Failed to load auth middleware: {e}")
+
 # ======================================================
 # ROUTERS - Consolidated Structure
 # ======================================================
@@ -78,6 +88,26 @@ try:
 except ImportError:
     live_prices_router = None
 
+# NEW: Authentication routers
+try:
+    from backend.routers.auth_router import router as auth_router
+except ImportError:
+    auth_router = None
+
+try:
+    from backend.routers.subscription_router import router as subscription_router
+except ImportError:
+    subscription_router = None
+
+try:
+    from backend.routers.admin_router_auth import router as admin_auth_router
+except ImportError:
+    admin_auth_router = None
+
+try:
+    from backend.routers.webhook_router import router as webhook_router
+except ImportError:
+    webhook_router = None
 try:
     from backend.routers.swing_tuning_router import router as swing_tuning_router
 except ImportError:
@@ -130,7 +160,17 @@ def _backend_heartbeat():
 
 @app.on_event("startup")
 def on_startup():
-    print("[Backend] 🚀 Startup sequence.. .", flush=True)
+    print("[Backend] 🚀 Startup sequence...", flush=True)
+    
+    # Initialize database if auth is enabled
+    if AUTH_ENABLED:
+        try:
+            from backend.database.connection import init_db
+            init_db()
+            print("[Backend] ✅ Database initialized")
+        except Exception as e:
+            print(f"[Backend] ⚠️  Database initialization failed: {e}")
+    
     threading.Thread(target=_backend_heartbeat, daemon=True).start()
     print("[Backend] ✅ Ready!", flush=True)
 

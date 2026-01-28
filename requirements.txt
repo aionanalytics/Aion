@@ -17,10 +17,22 @@ tqdm
 transformers
 torch
 alpaca_trade_api
-python-dotenv>1.0
+python-dotenv>=1.0
 requests>2.31
 schedule
 werkzeug
 numpy>=1.26,<2.0
 pandas==2.2,<2.3
 prometheus-client>=0.19.0
+
+# Authentication & Database
+sqlalchemy>=2.0,<3.0
+psycopg2-binary>=2.9,<3.0
+alembic>=1.13,<2.0
+passlib[bcrypt]>=1.7,<2.0
+python-jose[cryptography]>=3.3,<4.0
+python-multipart>=0.0.6,<1.0
+bcrypt>=4.0,<5.0
+
+# Stripe Payment Processing
+stripe>=7.0,<8.0
