@@ -7,11 +7,11 @@
 
 ## Executive Summary
 
-**Status:** ✅ **EXCELLENT** - No circular dependencies detected  
-**Files Scanned:** 150+ Python modules  
-**Total Imports:** 1000+ import statements analyzed  
+**Status:** ⚠️ **1 Circular Dependency Found** - Requires immediate attention  
+**Files Scanned:** 280+ Python modules  
+**Total Imports:** 2,339 import statements analyzed  
 **Configuration Pattern:** Centralized via shim layer (`backend.core.config`)  
-**Architecture:** Clean DAG (Directed Acyclic Graph) structure
+**Architecture:** Mostly clean DAG structure with one cycle
 
 ---
 
@@ -475,9 +475,70 @@ Analyzed all import chains for cycles using graph traversal:
 
 ### 5.2 Results
 
-**✅ ZERO CIRCULAR DEPENDENCIES FOUND**
+**❌ 1 CIRCULAR DEPENDENCY FOUND**
 
-**Verified chains:**
+**Cycle #1: Historical Replay Modules**
+```
+backend.historical_replay_swing.snapshot_manager
+  ↓ imports
+backend.services.backfill_history
+  ↓ imports
+backend.services.replay_data_pipeline
+  ↓ imports (back to start)
+backend.historical_replay_swing.snapshot_manager
+```
+
+**Root Cause:**
+- `snapshot_manager` needs `backfill_history` for data loading
+- `backfill_history` needs `replay_data_pipeline` for processing
+- `replay_data_pipeline` needs `snapshot_manager` for snapshots
+- Creates a circular dependency triangle
+
+**Impact:**
+- Can cause import errors at runtime
+- Makes modules hard to test in isolation
+- Prevents proper dependency injection
+- Violates single responsibility principle
+
+**Fix Required:**
+Extract shared types/interfaces to break the cycle:
+
+```python
+# NEW FILE: backend/historical_replay_swing/types.py
+from dataclasses import dataclass
+from typing import Dict, Any
+
+@dataclass
+class SnapshotData:
+    """Shared snapshot data structure"""
+    timestamp: str
+    data: Dict[str, Any]
+
+@dataclass
+class ReplayConfig:
+    """Shared replay configuration"""
+    start_date: str
+    end_date: str
+
+# THEN UPDATE EACH MODULE:
+# snapshot_manager.py
+from backend.historical_replay_swing.types import SnapshotData, ReplayConfig
+# Remove direct imports of backfill_history and replay_data_pipeline
+
+# backfill_history.py  
+from backend.historical_replay_swing.types import SnapshotData
+# Remove import of snapshot_manager
+
+# replay_data_pipeline.py
+from backend.historical_replay_swing.types import ReplayConfig
+# Remove import of snapshot_manager
+```
+
+**Status:** ❌ **MUST FIX** - Critical architectural issue
+
+---
+
+**Other verified chains:**
 - Router → Service → Core → Config ✅
 - Service → Service (sibling calls) ✅
 - Core AI Model (relative imports within package) ✅
@@ -798,16 +859,16 @@ python3 scripts/check_circular_imports.py
 
 | Check | Status | Details |
 |-------|--------|---------|
-| Circular dependencies | ✅ Pass | 0 cycles detected |
+| Circular dependencies | ⚠️ 1 Found | Historical replay cycle (must fix) |
 | Missing imports | ✅ Pass | All imports resolve |
-| Config access pattern | ✅ Pass | Via shim layer |
+| Config access pattern | ✅ Pass | Via shim layer (21 minor violations) |
 | Cross-engine coupling | ✅ Pass | 2 bridges (minimal) |
 | Import depth | ✅ Pass | Max 4 levels (acceptable) |
 | Root config isolation | ✅ Pass | No back-imports |
 | Type ignore usage | ✅ Pass | Only in shim (3 files) |
 | Fallback imports | ✅ Pass | None needed |
 
-**Overall Grade:** ✅ **A+ (Excellent)**
+**Overall Grade:** ⚠️ **B+ (Good with 1 critical issue)**
 
 ---
 
