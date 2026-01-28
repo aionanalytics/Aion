@@ -102,4 +102,6 @@ def api_intraday_refresh():
     Run the full intraday inference cycle (context → features → scoring → policy → execution)
     and return updated results.
     """
-    return run_intraday_cycle()
+    summary, _rolling = run_intraday_cycle()
+    # Return only the summary to API clients (rolling data is internal)
+    return summary

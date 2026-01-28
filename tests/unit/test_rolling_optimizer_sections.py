@@ -332,3 +332,144 @@ def test_unified_format_structure(temp_dir, mock_paths):
         # Check swing_bots section structure
         assert "bots" in data["swing_bots"]
         assert "timestamp" in data["swing_bots"]
+
+
+@pytest.mark.unit
+def test_in_memory_rolling_data_swing(temp_dir, mock_paths):
+    """Test that in-memory rolling_data parameter works for swing section."""
+    with patch("backend.services.rolling_optimizer.PATHS", mock_paths):
+        optimizer = RollingOptimizer(section="swing")
+        
+        # Create in-memory data instead of file
+        in_memory_data = {
+            "NVDA": {
+                "prediction": 2.5,
+                "confidence": 0.92,
+                "price": 500.0,
+                "last": 500.0,
+                "sentiment": "very_bullish",
+                "target_price": 550.0,
+                "stop_loss": 480.0,
+                "timestamp": "2024-01-27T12:00:00Z"
+            },
+            "AMD": {
+                "prediction": 1.8,
+                "confidence": 0.78,
+                "price": 180.0,
+                "last": 180.0,
+                "sentiment": "bullish",
+                "timestamp": "2024-01-27T12:00:00Z"
+            }
+        }
+        
+        # Pass in-memory data to optimizer
+        optimizer_with_data = RollingOptimizer(section="swing", rolling_data=in_memory_data)
+        result = optimizer_with_data.stream_and_optimize()
+        
+        # Verify optimization succeeded
+        assert result["status"] == "success"
+        assert result["section"] == "swing"
+        assert result["stats"]["predictions_extracted"] == 2
+        
+        # Load and verify the predictions came from in-memory data
+        with gzip.open(optimizer.rolling_optimized, "rt", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        assert len(data["swing"]["predictions"]) == 2
+        symbols = [p["symbol"] for p in data["swing"]["predictions"]]
+        assert "NVDA" in symbols
+        assert "AMD" in symbols
+        
+        # Verify NVDA has highest confidence and is first
+        assert data["swing"]["predictions"][0]["symbol"] == "NVDA"
+        assert data["swing"]["predictions"][0]["confidence"] == 0.92
+
+
+@pytest.mark.unit
+def test_in_memory_rolling_data_prevents_file_read(temp_dir, mock_paths):
+    """Test that in-memory data prevents file I/O (race condition fix)."""
+    with patch("backend.services.rolling_optimizer.PATHS", mock_paths):
+        da_brains = temp_dir / "da_brains"
+        rolling_body = da_brains / "rolling_body.json.gz"
+        
+        # Create a file with different data (should be ignored)
+        create_test_rolling_body(rolling_body)
+        
+        # In-memory data with different symbols
+        in_memory_data = {
+            "TSLA": {
+                "prediction": 3.0,
+                "confidence": 0.95,
+                "price": 200.0,
+                "last": 200.0,
+                "sentiment": "bullish",
+                "timestamp": "2024-01-27T14:00:00Z"
+            }
+        }
+        
+        # Optimize with in-memory data
+        result = optimize_rolling_data(section="swing", rolling_data=in_memory_data)
+        
+        assert result["status"] == "success"
+        assert result["stats"]["predictions_extracted"] == 1
+        
+        # Verify it used in-memory data, NOT the file
+        optimizer = RollingOptimizer(section="swing")
+        with gzip.open(optimizer.rolling_optimized, "rt", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        symbols = [p["symbol"] for p in data["swing"]["predictions"]]
+        assert "TSLA" in symbols  # From in-memory data
+        assert "AAPL" not in symbols  # From file (should be ignored)
+        assert "GOOGL" not in symbols  # From file (should be ignored)
+
+
+@pytest.mark.unit
+def test_backward_compatibility_none_rolling_data(temp_dir, mock_paths):
+    """Test backward compatibility when rolling_data is None (default)."""
+    with patch("backend.services.rolling_optimizer.PATHS", mock_paths):
+        da_brains = temp_dir / "da_brains"
+        rolling_body = da_brains / "rolling_body.json.gz"
+        
+        # Create test file
+        create_test_rolling_body(rolling_body)
+        
+        # Call with rolling_data=None (default) - should read from disk
+        result = optimize_rolling_data(section="swing", rolling_data=None)
+        
+        assert result["status"] == "success"
+        assert result["stats"]["predictions_extracted"] == 2
+        
+        # Verify it read from disk
+        optimizer = RollingOptimizer(section="swing")
+        with gzip.open(optimizer.rolling_optimized, "rt", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        symbols = [p["symbol"] for p in data["swing"]["predictions"]]
+        assert "AAPL" in symbols
+        assert "GOOGL" in symbols
+
+
+@pytest.mark.unit
+def test_optimize_function_with_in_memory_data(temp_dir, mock_paths):
+    """Test optimize_rolling_data function with in-memory parameter."""
+    with patch("backend.services.rolling_optimizer.PATHS", mock_paths):
+        # Test data
+        in_memory_data = {
+            "SPY": {
+                "prediction": 1.2,
+                "confidence": 0.88,
+                "price": 450.0,
+                "last": 450.0,
+                "sentiment": "neutral",
+                "timestamp": "2024-01-27T15:00:00Z"
+            }
+        }
+        
+        # Call main entry point with in-memory data
+        result = optimize_rolling_data(section="swing", rolling_data=in_memory_data)
+        
+        assert result["status"] == "success"
+        assert result["section"] == "swing"
+        assert result["stats"]["predictions_extracted"] == 1
+
