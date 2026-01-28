@@ -50,10 +50,11 @@ class TestNightlyJobMarketClosed:
         # would return False after hours. Now with is_trading_day(), it should run.
         result = run_dt_nightly_job(session_date="2024-01-08")  # Regular Monday
         
-        # Should NOT be skipped
+        # Should NOT be skipped - continuous_learning should be attempted
         assert result["status"] == "ok"
         assert "continuous_learning" in result
-        assert result["continuous_learning"] != "skipped" or result["continuous_learning"] == "missing"
+        # continuous_learning can be "ok", "missing", or an error, but NOT "skipped"
+        assert result["continuous_learning"] != "skipped"
 
 
 class TestNightlyJobMarketOpen:
