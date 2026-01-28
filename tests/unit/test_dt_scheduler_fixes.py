@@ -14,40 +14,40 @@ from dt_backend.jobs.dt_scheduler import _is_market_open_on_date
 class TestIsMarketOpenOnDate:
     """Test _is_market_open_on_date helper function."""
     
-    @patch('dt_backend.core.market_hours.is_market_open')
-    def test_trading_day_returns_true(self, mock_is_market_open):
+    @patch('dt_backend.core.market_hours.is_trading_day')
+    def test_trading_day_returns_true(self, mock_is_trading_day):
         """Test that a regular trading day returns True."""
-        mock_is_market_open.return_value = True
+        mock_is_trading_day.return_value = True
         
         result = _is_market_open_on_date("2024-01-08")  # Monday
         
         assert result is True
-        mock_is_market_open.assert_called_once_with("2024-01-08")
+        mock_is_trading_day.assert_called_once_with("2024-01-08")
     
-    @patch('dt_backend.core.market_hours.is_market_open')
-    def test_weekend_returns_false(self, mock_is_market_open):
+    @patch('dt_backend.core.market_hours.is_trading_day')
+    def test_weekend_returns_false(self, mock_is_trading_day):
         """Test that weekend returns False."""
-        mock_is_market_open.return_value = False
+        mock_is_trading_day.return_value = False
         
         result = _is_market_open_on_date("2024-01-06")  # Saturday
         
         assert result is False
-        mock_is_market_open.assert_called_once_with("2024-01-06")
+        mock_is_trading_day.assert_called_once_with("2024-01-06")
     
-    @patch('dt_backend.core.market_hours.is_market_open')
-    def test_holiday_returns_false(self, mock_is_market_open):
+    @patch('dt_backend.core.market_hours.is_trading_day')
+    def test_holiday_returns_false(self, mock_is_trading_day):
         """Test that holiday returns False."""
-        mock_is_market_open.return_value = False
+        mock_is_trading_day.return_value = False
         
         result = _is_market_open_on_date("2024-01-15")  # MLK Day
         
         assert result is False
-        mock_is_market_open.assert_called_once_with("2024-01-15")
+        mock_is_trading_day.assert_called_once_with("2024-01-15")
     
     def test_fallback_weekday_check(self):
         """Test fallback to simple weekday check when market_hours is unavailable."""
         # Patch to raise exception to test fallback
-        with patch('dt_backend.core.market_hours.is_market_open', side_effect=ImportError):
+        with patch('dt_backend.core.market_hours.is_trading_day', side_effect=ImportError):
             # Monday should return True (weekday < 5)
             result = _is_market_open_on_date("2024-01-08")
             assert result is True
@@ -62,7 +62,7 @@ class TestIsMarketOpenOnDate:
     
     def test_invalid_date_returns_false(self):
         """Test that invalid date string returns False."""
-        with patch('dt_backend.core.market_hours.is_market_open', side_effect=ImportError):
+        with patch('dt_backend.core.market_hours.is_trading_day', side_effect=ImportError):
             result = _is_market_open_on_date("not-a-date")
             assert result is False
 
