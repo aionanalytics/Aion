@@ -14,12 +14,16 @@ import pytest
 from dt_backend.engines import broker_api
 
 
+# Test constants
+DEPLETED_CASH = 7333.55  # Represents a scenario where local ledger is depleted
+
+
 @pytest.fixture
 def mock_ledger():
     """Mock ledger with depleted cash."""
     ledger_data = {
         "bot_id": "test_bot",
-        "cash": 7333.55,  # Depleted local ledger
+        "cash": DEPLETED_CASH,  # Depleted local ledger
         "positions": {"ACTIVE": {}, "CARRY": {}},
         "fills": [],
         "meta": {
@@ -69,25 +73,35 @@ class TestSyncAccountToLedger:
         assert result["status"] == "skipped"
         assert result["reason"] == "empty_account_response"
         assert result["synced"] is False
-        assert result["cash_before"] == 7333.55
-        assert result["cash_after"] == 7333.55  # Unchanged
+        assert result["cash_before"] == DEPLETED_CASH
+        assert result["cash_after"] == DEPLETED_CASH  # Unchanged
         
         # Verify ledger was not modified
-        assert mock_ledger["data"]["cash"] == 7333.55
+        assert mock_ledger["data"]["cash"] == DEPLETED_CASH
     
     @patch('dt_backend.engines.broker_api._alpaca_enabled')
     @patch('dt_backend.engines.broker_api.get_account_cached')
-    def test_sync_skipped_when_broker_cash_zero(self, mock_account, mock_enabled, mock_ledger):
+    def test_sync_skipped_when_broker_cash_zero_or_negative(self, mock_account, mock_enabled, mock_ledger):
         """Test that sync is skipped when broker cash is 0 or negative."""
         mock_enabled.return_value = True
-        mock_account.return_value = {"cash": 0.0, "equity": 0.0}
         
+        # Test with zero cash
+        mock_account.return_value = {"cash": 0.0, "equity": 0.0}
         result = broker_api.sync_account_to_ledger(force=True)
         
         assert result["status"] == "skipped"
         assert result["reason"] == "invalid_broker_cash"
         assert result["synced"] is False
         assert result["broker_cash"] == 0.0
+        
+        # Test with negative cash
+        mock_account.return_value = {"cash": -1000.0, "equity": 0.0}
+        result = broker_api.sync_account_to_ledger(force=True)
+        
+        assert result["status"] == "skipped"
+        assert result["reason"] == "invalid_broker_cash"
+        assert result["synced"] is False
+        assert result["broker_cash"] == -1000.0
     
     @patch('dt_backend.engines.broker_api._alpaca_enabled')
     @patch('dt_backend.engines.broker_api.get_account_cached')
@@ -105,7 +119,7 @@ class TestSyncAccountToLedger:
         assert result["status"] == "ok"
         assert result["reason"] == "cash_synced"
         assert result["synced"] is True
-        assert result["cash_before"] == 7333.55
+        assert result["cash_before"] == DEPLETED_CASH
         assert result["cash_after"] == 100000.0
         assert result["broker_cash"] == 100000.0
         
@@ -194,7 +208,7 @@ class TestSyncLogging:
         
         assert len(success_logs) > 0
         log_msg = str(success_logs[0])
-        assert "$7333.55" in log_msg
+        assert f"${DEPLETED_CASH:.2f}" in log_msg
         assert "$100000.00" in log_msg
     
     @patch('dt_backend.engines.broker_api._alpaca_enabled')

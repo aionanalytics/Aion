@@ -785,6 +785,15 @@ def sync_account_to_ledger(*, force: bool = False) -> Dict[str, Any]:
     This function solves the issue where the local ledger cash gets depleted 
     with orders, but the Alpaca account actually has the full balance.
     
+    Difference from reconcile_ledger_from_broker:
+    - This is a lightweight, cash-only sync focused on the specific use case
+      of refreshing available cash before order execution
+    - reconcile_ledger_from_broker is a more comprehensive function that syncs
+      positions AND optionally cash, with different reconciliation modes
+    - This function provides more detailed status/logging for the cash sync operation
+    - Use this before order execution; use reconcile_ledger_from_broker for
+      full ledger reconciliation (e.g., on startup or after manual broker changes)
+    
     Args:
         force: If True, forces a fresh fetch from Alpaca (bypasses cache)
         
