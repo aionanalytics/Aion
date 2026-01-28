@@ -606,7 +606,7 @@ The supervisor monitors all processes and automatically restarts them if they cr
 # Run scheduler in foreground (for testing)
 python -m backend.scheduler_runner
 
-# Run single job once (without waiting for scheduled time)
+# Check schedule once and exit (jobs only run if current time matches their scheduled time)
 python -m backend.scheduler_runner --once
 ```
 

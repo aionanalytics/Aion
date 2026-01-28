@@ -222,7 +222,6 @@ if __name__ == "__main__":
     print("────────────────────────────────────────")
     print("🚀 Launching AION Analytics system")
     print(f"   • backend API       → http://{backend_host}:{primary_port} (workers={PRIMARY_WORKERS}, unified port)")
-    print(f"   • backend scheduler → running scheduled jobs (nightly_job at 17:30 MT)")
     print(f"   • dt_backend        → http://{dt_host}:{dt_port} (workers={DT_WORKERS})")
     print(f"   • replay_service    → http://{replay_host}:{replay_port} (dormant, workers={REPLAY_WORKERS})")
     if _should_silence_supervisor_agent():
@@ -297,6 +296,9 @@ if __name__ == "__main__":
     if module_exists("backend.scheduler_runner"):
         backend_scheduler_proc = launch([sys.executable, "-m", "backend.scheduler_runner"], "backend_scheduler")
         threading.Thread(target=pipe_output, args=(backend_scheduler_proc, "backend_scheduler"), daemon=True).start()
+        print("   ✓ backend scheduler → running scheduled jobs (nightly_job at 17:30 MT)", flush=True)
+    else:
+        print("   ⚠️ backend scheduler → module not found, skipping", flush=True)
 
     replay_proc = launch(
         uvicorn_cmd(
