@@ -647,6 +647,15 @@ def run_nightly_job(
                 # This is critical - predictions generated but not persisted
                 raise RuntimeError(f"Failed to persist predictions to rolling file: {e_save}") from e_save
 
+            # PASS 1: Immediate optimization with in-memory data (prevents race condition)
+            try:
+                _require(optimize_rolling_data, "backend.services.rolling_optimizer.optimize_rolling_data")
+                res_pass1 = optimize_rolling_data(section="swing", rolling_data=rolling)
+                log(f"✅ Pass 1 rolling optimization complete (in-memory): {res_pass1.get('status')}")
+            except Exception as e_opt:
+                log(f"⚠️ Pass 1 rolling optimizer failed (continuing): {e_opt}")
+
+
             # Update rolling_nervous predictions history (best-effort)
             try:
                 nervous = _read_rolling_nervous() or {}
@@ -696,18 +705,21 @@ def run_nightly_job(
             _write_summary(summary)
             raise
 
-        # 11) Rolling optimizer (optimize data for frontend)
+        # 11) Rolling optimizer - PASS 2 (safety re-optimization after all phases)
         key, title = PIPELINE[11]
         _phase(title, 12, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(optimize_rolling_data, "backend.services.rolling_optimizer.optimize_rolling_data")
             
+            # Pass 2: Re-read rolling to catch any changes from intermediate phases
+            rolling_final = _read_rolling_with_retry(attempts=5, sleep_secs=2.0)
+            
             # Update swing section only - DT section updated by intraday job
-            res = optimize_rolling_data(section="swing")
+            res = optimize_rolling_data(section="swing", rolling_data=rolling_final)
             _record_ok(summary, key, res, t0)
             _write_summary(summary)
-            log("✅ Rolling data optimization complete (swing section).")
+            log("✅ Pass 2 rolling optimization complete (final safety re-optimization).")
         except Exception as e:
             _record_err(summary, key, e, t0)
             _write_summary(summary)

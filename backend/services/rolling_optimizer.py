@@ -51,7 +51,7 @@ class RollingOptimizer:
     - section="dt": Updates only dt section from rolling_intraday.json.gz
     """
     
-    def __init__(self, section: Literal["swing", "dt"] = "swing"):
+    def __init__(self, section: Literal["swing", "dt"] = "swing", rolling_data: Optional[Dict[str, Any]] = None):
         """
         Initialize optimizer with paths.
         
@@ -59,6 +59,8 @@ class RollingOptimizer:
             section: Which section to update ("swing" or "dt")
                 - "swing": Reads from rolling_body.json.gz, updates swing/swing_bots sections
                 - "dt": Reads from rolling_intraday.json.gz, updates dt section
+            rolling_data: Optional in-memory rolling data to use instead of reading from disk.
+                If provided, eliminates file I/O race conditions by using fresh data directly.
         
         Raises:
             ValueError: If section is not "swing" or "dt"
@@ -67,6 +69,7 @@ class RollingOptimizer:
             raise ValueError(f"Invalid section: {section}. Must be 'swing' or 'dt'")
         
         self.section = section
+        self.rolling_data = rolling_data
         
         da_brains = Path(PATHS.get("da_brains", "da_brains"))
         da_brains.mkdir(parents=True, exist_ok=True)
@@ -256,22 +259,33 @@ class RollingOptimizer:
         """
         Extract top predictions from rolling file using streaming.
         
+        Prefers in-memory rolling_data if available (eliminates race conditions),
+        otherwise reads from disk.
+        
         Returns:
             List of prediction dicts with minimal fields.
         """
         predictions = []
         
-        if not self.rolling_input.exists():
+        # Use in-memory data if provided (Pass 1 optimization)
+        if self.rolling_data is not None:
+            data = self.rolling_data
+        elif not self.rolling_input.exists():
             return predictions
+        else:
+            # Fall back to disk read (Pass 2 or backward compatibility)
+            try:
+                # Stream and parse JSON incrementally to avoid loading entire file
+                with gzip.open(self.rolling_input, "rt", encoding="utf-8") as f:
+                    # For now, load full file but track memory
+                    # TODO: Implement true streaming with ijson for >1GB files
+                    content = f.read()
+                    data = json.loads(content)
+            except Exception as e:
+                print(f"[RollingOptimizer] Error reading from disk: {e}")
+                return predictions
         
         try:
-            # Stream and parse JSON incrementally to avoid loading entire file
-            with gzip.open(self.rolling_input, "rt", encoding="utf-8") as f:
-                # For now, load full file but track memory
-                # TODO: Implement true streaming with ijson for >1GB files
-                content = f.read()
-                data = json.loads(content)
-            
             # Extract predictions from rolling data
             if isinstance(data, dict):
                 for symbol, node in data.items():
@@ -412,7 +426,7 @@ class RollingOptimizer:
         return {"holdings": holdings, "timestamp": datetime.now(TIMEZONE).isoformat()}
 
 
-def optimize_rolling_data(section: Literal["swing", "dt"] = "swing") -> Dict[str, Any]:
+def optimize_rolling_data(section: Literal["swing", "dt"] = "swing", rolling_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Main entry point for rolling optimization with section isolation.
     
@@ -420,11 +434,14 @@ def optimize_rolling_data(section: Literal["swing", "dt"] = "swing") -> Dict[str
         section: Which section to update ("swing" or "dt")
             - "swing": Updates swing/swing_bots sections from rolling_body.json.gz (nightly)
             - "dt": Updates dt section from rolling_intraday.json.gz (intraday)
+        rolling_data: Optional in-memory rolling data to use instead of reading from disk.
+            When provided, eliminates race conditions by using fresh data directly from memory.
+            This is the "Pass 1" optimization - immediate optimization with just-written data.
     
     Returns:
         Status dict with processing stats.
     """
-    optimizer = RollingOptimizer(section=section)
+    optimizer = RollingOptimizer(section=section, rolling_data=rolling_data)
     return optimizer.stream_and_optimize()
 
 
