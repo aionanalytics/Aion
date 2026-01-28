@@ -29,10 +29,13 @@ JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", secrets.token_urlsafe(32))
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 REFRESH_TOKEN_EXPIRE_DAYS = 30
-BCRYPT_ROUNDS = 12
 
-# Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Password hashing context with bcrypt rounds configured
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+    bcrypt__rounds=12  # 12 rounds for security
+)
 
 # Account lockout configuration
 MAX_LOGIN_ATTEMPTS = 5
@@ -54,7 +57,7 @@ def hash_password(password: str) -> str:
     Returns:
         Hashed password
     """
-    return pwd_context.hash(password, rounds=BCRYPT_ROUNDS)
+    return pwd_context.hash(password)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -329,7 +332,7 @@ def verify_token(db: Session, token: str) -> Tuple[bool, Optional[str], Optional
         token_hash = hash_token(token)
         token_record = db.query(Token).filter(
             Token.token_hash == token_hash,
-            Token.revoked == False
+            Token.revoked.is_(False)
         ).first()
         
         if not token_record:

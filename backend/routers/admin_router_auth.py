@@ -224,7 +224,7 @@ async def get_stats(
         Subscription.status == "past_due"
     ).count()
     early_adopters = db.query(Subscription).filter(
-        Subscription.early_adopter_discount == True
+        Subscription.early_adopter_discount.is_(True)
     ).count()
     
     return {

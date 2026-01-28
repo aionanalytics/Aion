@@ -24,7 +24,6 @@ except Exception:
 # Configuration
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", secrets.token_urlsafe(32))
 JWT_ALGORITHM = "HS256"
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
 ADMIN_TOKEN_EXPIRE_HOURS = 24
 
@@ -43,10 +42,7 @@ def verify_admin_password(password: str) -> bool:
     Returns:
         True if password matches
     """
-    # Support both plain password and hashed password in env
-    if ADMIN_PASSWORD and password == ADMIN_PASSWORD:
-        return True
-    
+    # Only support hashed password for security
     if ADMIN_PASSWORD_HASH:
         # Simple SHA-256 hash comparison for admin password
         password_hash = hashlib.sha256(password.encode()).hexdigest()
@@ -114,7 +110,7 @@ def verify_admin_token(db: Session, token: str) -> Tuple[bool, Optional[str]]:
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         token_record = db.query(AdminToken).filter(
             AdminToken.token_hash == token_hash,
-            AdminToken.revoked == False
+            AdminToken.revoked.is_(False)
         ).first()
         
         if not token_record:

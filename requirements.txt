@@ -17,7 +17,7 @@ tqdm
 transformers
 torch
 alpaca_trade_api
-python-dotenv>1.0
+python-dotenv>=1.0
 requests>2.31
 schedule
 werkzeug
@@ -36,6 +36,3 @@ bcrypt>=4.0,<5.0
 
 # Stripe Payment Processing
 stripe>=7.0,<8.0
-
-# Email for password reset
-python-dotenv>=1.0

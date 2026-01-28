@@ -163,7 +163,7 @@ def create_subscription(
     if early_adopter:
         # Count active subscriptions with early adopter discount
         count = db.query(Subscription).filter(
-            Subscription.early_adopter_discount == True
+            Subscription.early_adopter_discount.is_(True)
         ).count()
         
         if count >= EARLY_ADOPTER_COUNT_LIMIT:

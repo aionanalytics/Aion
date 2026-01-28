@@ -463,6 +463,52 @@ https://yourdomain.com/api/webhooks/stripe
 - customer.subscription.updated
 ```
 
+## Security Notes
+
+### ⚠️ Frontend Token Storage
+
+**Current Implementation**: The frontend auth pages store JWT tokens in `localStorage`. This is **NOT production-ready** and is vulnerable to XSS attacks.
+
+**Production Recommendations**:
+
+1. **Use HttpOnly Cookies** (Recommended):
+   ```typescript
+   // Backend sends token in httpOnly cookie
+   response.set_cookie(
+       key="access_token",
+       value=token,
+       httponly=True,
+       secure=True,
+       samesite="strict"
+   )
+   ```
+
+2. **Token Encryption** (Alternative):
+   - Encrypt tokens before storing in localStorage
+   - Use AES-256-GCM encryption
+   - Store encryption key securely (not in browser)
+
+3. **Content Security Policy**:
+   ```html
+   <meta http-equiv="Content-Security-Policy"
+         content="default-src 'self'; script-src 'self'">
+   ```
+
+4. **Additional Security Layers**:
+   - Implement token refresh rotation
+   - Use short-lived access tokens (15 minutes)
+   - Implement device fingerprinting
+   - Add CSRF tokens for state-changing operations
+
+### Admin Password Security
+
+**IMPORTANT**: The system now **only** supports hashed admin passwords via `ADMIN_PASSWORD_HASH`. Never store plain text passwords in environment variables.
+
+Generate admin password hash:
+```bash
+python -c "import hashlib; print(hashlib.sha256(b'YOUR_PASSWORD').hexdigest())"
+```
+
 ## Troubleshooting
 
 ### "Database connection failed"
