@@ -31,15 +31,15 @@ class TestSwingBotEODPhase:
     def test_total_phases_count(self):
         """Test that TOTAL_PHASES matches PIPELINE length."""
         assert nightly_job.TOTAL_PHASES == len(nightly_job.PIPELINE)
-        assert nightly_job.TOTAL_PHASES == 21, "Expected 21 phases including swing_bot_eod"
+        assert nightly_job.TOTAL_PHASES == 23, "Expected 23 phases including swing_bot_eod"
         
     def test_swing_bot_eod_phase_position(self):
         """Test that swing_bot_eod is at the correct position in PIPELINE."""
-        # Phase 18 (index 17) should be policy
-        # Phase 19 (index 18) should be swing_bot_eod
-        assert nightly_job.PIPELINE[17][0] == "policy"
-        assert nightly_job.PIPELINE[18][0] == "swing_bot_eod"
-        assert nightly_job.PIPELINE[18][1] == "Swing Bot EOD Rebalance"
+        # Phase 19 (index 18) should be policy
+        # Phase 20 (index 19) should be swing_bot_eod
+        assert nightly_job.PIPELINE[19][0] == "policy"
+        assert nightly_job.PIPELINE[20][0] == "swing_bot_eod"
+        assert nightly_job.PIPELINE[20][1] == "Swing Bot EOD Rebalance"
         
     @patch('subprocess.run')
     def test_swing_bot_execution_success(self, mock_subprocess):
