@@ -904,8 +904,9 @@ for key in critical:
 ./scripts/reset_and_restart.sh  # If exists
 
 # Or manually
-pkill -f "python3"
-rm -f da_brains/**/*.lock
+pkill -f "run_backend.py"
+pkill -f "scheduler_runner.py"
+find da_brains -name "*.lock" -type f -delete
 python3 run_backend.py &
 cd frontend && npm run dev &
 ```

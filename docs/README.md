@@ -370,9 +370,9 @@ python3 scripts/validate_all.py
 
 ## 📊 Documentation Stats
 
-- **Total Documentation:** 6 files
-- **Total Words:** ~68,000 words
-- **Total Lines:** ~3,800 lines
+- **Total Documentation:** 7 files (6 main docs + 1 index)
+- **Total Size:** ~107 KB
+- **Total Lines:** ~4,000 lines
 - **Validation Scripts:** 4 scripts
 - **Coverage:** 100% of system components
 
