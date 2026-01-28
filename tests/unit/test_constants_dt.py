@@ -95,8 +95,12 @@ class TestConstants:
         assert CONFIDENCE_MIN_PROBE < CONFIDENCE_MIN_EXEC
 
     def test_position_max_fraction_reasonable(self):
-        """POSITION_MAX_FRACTION should be between 0.05 and 0.30."""
-        assert 0.05 <= POSITION_MAX_FRACTION <= 0.30
+        """POSITION_MAX_FRACTION should be between 0.0001 and 0.30.
+        
+        Lower bound allows for high symbol count trading (e.g., 0.001 = 0.1% for 5000+ symbols).
+        Upper bound prevents over-concentration in single positions.
+        """
+        assert 0.0001 <= POSITION_MAX_FRACTION <= 0.30
 
     def test_position_probe_fraction_reasonable(self):
         """POSITION_PROBE_FRACTION should be between 0.1 and 0.5."""
@@ -229,7 +233,9 @@ class TestHelperFunctions:
 
     def test_validate_position_fraction_within_range(self):
         """validate_position_fraction should return value when within range."""
-        assert validate_position_fraction(0.10) == 0.10
+        # Test with a value that's definitely within range
+        test_val = POSITION_MAX_FRACTION * 0.5  # Half of max
+        assert validate_position_fraction(test_val) == test_val
 
     def test_validate_position_fraction_above_max(self):
         """validate_position_fraction should clamp to POSITION_MAX_FRACTION."""

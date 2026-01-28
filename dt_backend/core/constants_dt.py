@@ -8,6 +8,7 @@ All trading constants, thresholds, and limits are defined here for easy maintena
 Version: 1.0.0
 """
 
+import os
 from typing import Dict, Tuple
 
 # ============================================================
@@ -24,7 +25,9 @@ CONFIDENCE_EXIT_BUFFER = 0.05            # SELL margin above HOLD
 # POSITION SIZING
 # ============================================================
 
-POSITION_MAX_FRACTION = 0.15             # 15% of account max
+# Allow override via DT_POSITION_MAX_FRACTION env var (default: 0.15 = 15% of account max)
+# Can be reduced for high-symbol count trading (e.g., 0.001 = 0.1% for 5000+ symbols)
+POSITION_MAX_FRACTION = float(os.getenv("DT_POSITION_MAX_FRACTION", "0.15"))
 POSITION_PROBE_FRACTION = 0.25           # 25% of full conviction
 POSITION_PRESS_MULT = 1.35               # Scale-up for high P(Hit)
 POSITION_DEFAULT_QTY = 1.0               # Base shares per trade
