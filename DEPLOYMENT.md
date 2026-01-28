@@ -557,12 +557,138 @@ server {
 }
 ```
 
-### 3. Rate Limiting
+---
 
-Edit dt_knobs.env:
+## Scheduler Runner
+
+### Overview
+
+The AION platform includes two schedulers for automated job execution:
+
+1. **Backend Scheduler** (`backend/scheduler_runner.py`) - Runs nightly jobs, news collection, insights building, and EOD bot operations
+2. **DT Scheduler** (`dt_backend/jobs/dt_scheduler.py`) - Runs intraday trading cycles and live market data loops
+
+Both schedulers are automatically started by `run_backend.py` and monitored for crashes.
+
+### Backend Scheduler Jobs
+
+The backend scheduler runs jobs based on the schedule in `backend/scheduler_config.py`:
+
+| Job | Time (MT) | Description |
+|-----|-----------|-------------|
+| `nightly_full` | 17:30 | Full nightly rebuild (ML training, predictions, rolling file updates) |
+| `news_collect_morning` | 07:45 | Market-wide news collection |
+| `news_collect_midday` | 11:45 | Market-wide news collection |
+| `news_collect_afternoon` | 14:45 | Market-wide news collection |
+| `evening_insights` | 18:00 | Rebuild nightly insights/top picks |
+| `social_sentiment_evening` | 20:30 | Evening social sentiment refresh |
+| `eod_*_full` | 06:00 | Premarket rebalance for swing bots (1w, 2w, 4w) |
+| `bot_loop_*` | 11:35, 14:30 | Hourly loops for swing bots |
+| `eod_*_close` | 16:15 | Market close rebalance for swing bots |
+
+### How It Works
+
+When you run `python run_backend.py`, the supervisor:
+
+1. **Starts backend API** on port 8000
+2. **Starts backend scheduler** - Monitors time and executes jobs per schedule
+3. **Starts DT backend API** on port 8010
+4. **Starts DT scheduler** - Runs intraday cycles during market hours
+5. **Starts replay service** on port 8020
+
+The supervisor monitors all processes and automatically restarts them if they crash.
+
+### Manual Scheduler Control
+
+#### Start Backend Scheduler Manually
+
 ```bash
-DT_MIN_TRADE_GAP_MINUTES=15
-DT_MAX_TRADES_PER_SYMBOL_PER_DAY=2
+# Run scheduler in foreground (for testing)
+python -m backend.scheduler_runner
+
+# Run single job once (without waiting for scheduled time)
+python -m backend.scheduler_runner --once
+```
+
+#### Check Scheduler Logs
+
+Scheduler logs are written to `logs/scheduler/`:
+
+```bash
+# View scheduler runner log
+tail -f logs/scheduler/scheduler_runner.log
+
+# View specific job log (e.g., nightly job)
+tail -f logs/scheduler/nightly_full_20260128.log
+```
+
+#### Disable Scheduler
+
+To disable the backend scheduler, edit `backend/scheduler_config.py`:
+
+```python
+ENABLE = False  # Set to False to disable
+```
+
+Or set an environment variable:
+
+```bash
+export AION_SCHEDULER_ENABLE=0
+```
+
+### Monitoring Scheduler Health
+
+The scheduler writes heartbeat logs every time a job runs. Monitor these for health:
+
+```bash
+# Check if scheduler is running
+ps aux | grep scheduler_runner
+
+# Check recent job executions
+grep "START" logs/scheduler/scheduler_runner.log | tail -10
+
+# Check for failed jobs
+grep "FAIL" logs/scheduler/scheduler_runner.log | tail -10
+```
+
+### Troubleshooting
+
+**Issue**: Nightly job not running at 17:30 MT
+
+**Solutions**:
+1. Verify scheduler is running: `ps aux | grep scheduler_runner`
+2. Check timezone setting in `backend/scheduler_config.py` (should be `America/Denver`)
+3. Review scheduler logs: `tail -f logs/scheduler/scheduler_runner.log`
+4. Ensure `ENABLE = True` in `backend/scheduler_config.py`
+
+**Issue**: Job fails with import errors
+
+**Solutions**:
+1. Ensure PYTHONPATH includes project root
+2. Check that job module exists: `python -m backend.jobs.nightly_job --help`
+3. Review job-specific log file in `logs/scheduler/`
+
+**Issue**: Predictions not being written to rolling file
+
+**Solutions**:
+1. Check nightly job logs: `tail -f logs/scheduler/nightly_full_*.log`
+2. Verify rolling file permissions: `ls -la data/rolling_body.json`
+3. Check for errors in `save_rolling` call (search logs for "save_rolling")
+4. Run nightly job manually to test: `python -m backend.jobs.nightly_job`
+
+### Production Deployment
+
+In production, `run_backend.py` handles scheduler startup automatically. The systemd service ensures the scheduler runs continuously:
+
+```bash
+# Service includes backend scheduler
+sudo systemctl start aion-analytics
+
+# Check status
+sudo systemctl status aion-analytics
+
+# View all process logs
+sudo journalctl -u aion-analytics -f
 ```
 
 ---
