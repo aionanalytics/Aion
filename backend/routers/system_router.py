@@ -29,12 +29,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 
 # Core imports
 from backend.core.config import PATHS
 from backend.core.data_pipeline import _read_rolling, _read_brain, log
 from backend.core.supervisor_agent import supervisor_verdict
+from backend.admin.auth import require_admin
 from config import ROOT, DT_PATHS
 from settings import TIMEZONE
 
@@ -558,9 +559,11 @@ def diagnostics() -> Dict[str, Any]:
 
 
 @router.post("/action")
-def run_action(action: str):
+def run_action(action: str, _admin_token: str = Depends(require_admin)):
     """
     Execute system action (manual tasks, system operations).
+    
+    Requires admin authentication.
     
     Actions:
       - nightly, train, insights, metrics, fundamentals, news, verify, dashboard

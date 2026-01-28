@@ -77,23 +77,31 @@ def _iter_parquet_batches(
     pa, ds = _try_import_pyarrow()
     if pa is None or ds is None:
         # Fallback: one-shot read
-        df = pd.read_parquet(path, columns=columns) if columns else pd.read_parquet(path)
-        if symbol_whitelist and "symbol" in df.columns:
-            df = df[df["symbol"].astype(str).str.upper().isin(symbol_whitelist)]
-        yield df
+        try:
+            df = pd.read_parquet(path, columns=columns) if columns else pd.read_parquet(path)
+            if symbol_whitelist and "symbol" in df.columns:
+                df = df[df["symbol"].astype(str).str.upper().isin(symbol_whitelist)]
+            yield df
+        except Exception as e:
+            log(f"[ai_model] ❌ Failed to read parquet {path}: {e}")
+            yield pd.DataFrame()
         return
 
-    dataset = ds.dataset(str(path), format="parquet")
-    scanner = dataset.scanner(columns=columns, batch_size=int(batch_size))
-    for rb in scanner.to_batches():
-        if rb.num_rows <= 0:
-            continue
-        df = rb.to_pandas()
-        if symbol_whitelist and "symbol" in df.columns:
-            df = df[df["symbol"].astype(str).str.upper().isin(symbol_whitelist)]
-        if df is None or df.empty:
-            continue
-        yield df
+    try:
+        dataset = ds.dataset(str(path), format="parquet")
+        scanner = dataset.scanner(columns=columns, batch_size=int(batch_size))
+        for rb in scanner.to_batches():
+            if rb.num_rows <= 0:
+                continue
+            df = rb.to_pandas()
+            if symbol_whitelist and "symbol" in df.columns:
+                df = df[df["symbol"].astype(str).str.upper().isin(symbol_whitelist)]
+            if df is None or df.empty:
+                continue
+            yield df
+    except Exception as e:
+        log(f"[ai_model] ❌ Failed to read parquet dataset {path}: {e}")
+        yield pd.DataFrame()
 
 
 # ==========================================================

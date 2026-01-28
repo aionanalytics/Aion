@@ -119,9 +119,6 @@ def capture_eod_snapshot() -> EODSnapshot:
     
     date_str = datetime.now(timezone.utc).date().isoformat()
     
-    # Load current data
-    from backend.services.backfill_history import load_universe
-    
     # Get rolling state
     rolling_state = _read_rolling() or {}
     

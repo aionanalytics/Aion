@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 try:
     from backend.core.config import PATHS, TIMEZONE
@@ -900,6 +900,80 @@ async def get_eod_bot_config(bot_key: str) -> Dict[str, Any]:
 class EodConfigUpdateRequest(BaseModel):
     bot_key: str
     config: Dict[str, Any]
+    
+    @field_validator('config')
+    @classmethod
+    def validate_config(cls, v):
+        """Validate bot configuration values."""
+        if not isinstance(v, dict):
+            raise ValueError("config must be a dictionary")
+        
+        # Validate initial_cash (must be non-negative)
+        if 'initial_cash' in v:
+            try:
+                cash_val = float(v['initial_cash'])
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"initial_cash must be a valid number: {e}")
+            if cash_val < 0:
+                raise ValueError("initial_cash must be non-negative")
+        
+        # Validate max_alloc (must be non-negative if present)
+        if 'max_alloc' in v:
+            try:
+                alloc_val = float(v['max_alloc'])
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"max_alloc must be a valid number: {e}")
+            if alloc_val < 0:
+                raise ValueError("max_alloc must be non-negative")
+        
+        # Validate aggression (must be between 0 and 1)
+        if 'aggression' in v:
+            try:
+                agg_val = float(v['aggression'])
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"aggression must be a valid number: {e}")
+            if not 0 <= agg_val <= 1:
+                raise ValueError("aggression must be between 0 and 1")
+        
+        # Validate min_confidence (must be between 0 and 1)
+        if 'min_confidence' in v:
+            try:
+                conf_val = float(v['min_confidence'])
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"min_confidence must be a valid number: {e}")
+            if not 0 <= conf_val <= 1:
+                raise ValueError("min_confidence must be between 0 and 1")
+        
+        # Validate stop_loss (must be non-negative percent)
+        if 'stop_loss' in v:
+            try:
+                sl_val = float(v['stop_loss'])
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"stop_loss must be a valid percentage: {e}")
+            if sl_val < 0:
+                raise ValueError("stop_loss must be non-negative")
+            if sl_val > 100:
+                raise ValueError("stop_loss cannot exceed 100%")
+        
+        # Validate take_profit (must be non-negative percent)
+        if 'take_profit' in v:
+            try:
+                tp_val = float(v['take_profit'])
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"take_profit must be a valid percentage: {e}")
+            if tp_val < 0:
+                raise ValueError("take_profit must be non-negative")
+        
+        # Validate max_positions (must be non-negative integer)
+        if 'max_positions' in v:
+            try:
+                mp_val = int(v['max_positions'])
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"max_positions must be a valid integer: {e}")
+            if mp_val < 0:
+                raise ValueError("max_positions must be non-negative")
+        
+        return v
 
 
 @router.post("/configs")
