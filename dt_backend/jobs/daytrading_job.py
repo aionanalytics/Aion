@@ -639,6 +639,29 @@ def run_daytrading_cycle(
 
         exec_summary: Dict[str, Any] | None = None
         if execute:
+            # Sync Alpaca account cash to local ledger before execution
+            # This ensures the local ledger has the actual account balance,
+            # preventing "insufficient_cash_allowance" rejections when the
+            # Alpaca account has cash but the local ledger is depleted.
+            try:
+                from dt_backend.engines.broker_api import sync_account_to_ledger
+                
+                log(f"[dt_job] 💰 Syncing account cash to ledger...")
+                sync_result = sync_account_to_ledger(force=True)
+                
+                if sync_result.get("status") == "ok":
+                    cash_before = sync_result.get("cash_before", 0)
+                    cash_after = sync_result.get("cash_after", 0)
+                    log(f"[dt_job] ✅ Cash synced: ${cash_before:.2f} → ${cash_after:.2f}")
+                elif sync_result.get("status") == "skipped":
+                    reason = sync_result.get("reason", "unknown")
+                    log(f"[dt_job] ⚠️ Cash sync skipped: {reason}")
+                else:
+                    log(f"[dt_job] ⚠️ Cash sync result: {sync_result}")
+            except Exception as e:
+                # Don't let sync errors break the execution cycle
+                warn(f"[dt_job] ⚠️ Cash sync failed (continuing anyway): {e}")
+            
             log(f"[dt_job] 🔄 Trading enabled={execute}")
             exec_summary = execute_from_policy(execution_cfg)
             

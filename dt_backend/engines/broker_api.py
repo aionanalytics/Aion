@@ -779,6 +779,79 @@ def submit_order(order: Order, last_price: float | None = None) -> Dict[str, Any
 # =========================
 
 
+def sync_account_to_ledger(*, force: bool = False) -> Dict[str, Any]:
+    """Sync actual Alpaca account cash balance to local ledger.
+    
+    This function solves the issue where the local ledger cash gets depleted 
+    with orders, but the Alpaca account actually has the full balance.
+    
+    Args:
+        force: If True, forces a fresh fetch from Alpaca (bypasses cache)
+        
+    Returns:
+        Dict with sync status:
+        - status: "ok" | "skipped" | "failed"
+        - reason: description of what happened
+        - cash_before: ledger cash before sync
+        - cash_after: ledger cash after sync
+        - broker_cash: cash from Alpaca account
+        - synced: whether cash was actually updated
+    """
+    if not _alpaca_enabled():
+        return {
+            "status": "skipped", 
+            "reason": "alpaca_disabled",
+            "synced": False,
+        }
+    
+    state = _read_ledger()
+    cash_before = _safe_float(state.get("cash", 0.0), 0.0)
+    
+    # Get account info from Alpaca (with cache control)
+    acct = get_account_cached(force=force)
+    
+    # Handle empty account response
+    if not isinstance(acct, dict) or not acct:
+        log(f"[broker_sync] ⚠️ Alpaca account returned empty, keeping local cash at ${cash_before:.2f}")
+        return {
+            "status": "skipped",
+            "reason": "empty_account_response",
+            "cash_before": float(cash_before),
+            "cash_after": float(cash_before),
+            "broker_cash": 0.0,
+            "synced": False,
+        }
+    
+    # Extract cash from account
+    broker_cash = _safe_float(acct.get("cash"), 0.0)
+    
+    if broker_cash <= 0:
+        log(f"[broker_sync] ⚠️ Alpaca cash is ${broker_cash:.2f}, keeping local cash at ${cash_before:.2f}")
+        return {
+            "status": "skipped",
+            "reason": "invalid_broker_cash",
+            "cash_before": float(cash_before),
+            "cash_after": float(cash_before),
+            "broker_cash": float(broker_cash),
+            "synced": False,
+        }
+    
+    # Update ledger with actual broker cash
+    state["cash"] = float(broker_cash)
+    _save_ledger(state)
+    
+    log(f"[broker_sync] ✅ Synced cash: ${cash_before:.2f} → ${broker_cash:.2f}")
+    
+    return {
+        "status": "ok",
+        "reason": "cash_synced",
+        "cash_before": float(cash_before),
+        "cash_after": float(broker_cash),
+        "broker_cash": float(broker_cash),
+        "synced": True,
+    }
+
+
 def reconcile_ledger_from_broker(*, mode: str = "IMPORT", sync_cash: bool = False, allow_when_disabled: bool = False) -> Dict[str, Any]:
     mode = (mode or "IMPORT").strip().upper()
     if not _alpaca_enabled() and not allow_when_disabled:
@@ -945,3 +1018,6 @@ class BrokerAPI:
 
     def get_equity_cached(self, *, ttl_sec: int = 180, force: bool = False) -> float:
         return get_equity_cached(ttl_sec=ttl_sec, force=force)
+
+    def sync_account_to_ledger(self, *, force: bool = False) -> Dict[str, Any]:
+        return sync_account_to_ledger(force=force)
