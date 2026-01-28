@@ -78,6 +78,11 @@ try:
 except ImportError:
     live_prices_router = None
 
+try:
+    from backend.routers.swing_tuning_router import router as swing_tuning_router
+except ImportError:
+    swing_tuning_router = None
+
 # Include all routers
 ROUTERS = [
     # NEW: Consolidated routers (6 domain routers)
@@ -94,7 +99,7 @@ ROUTERS = [
 ]
 
 # Add optional routers if available
-for router in [model_router, testing_router, intraday_router, replay_router, page_data_router, live_prices_router]:
+for router in [model_router, testing_router, intraday_router, replay_router, page_data_router, live_prices_router, swing_tuning_router]:
     if router is not None:
         ROUTERS.append(router)
 
