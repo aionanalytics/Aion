@@ -8,6 +8,7 @@ All trading constants, thresholds, and limits are defined here for easy maintena
 Version: 1.0.0
 """
 
+import os
 from typing import Dict, Tuple
 
 # ============================================================
@@ -24,7 +25,17 @@ CONFIDENCE_EXIT_BUFFER = 0.05            # SELL margin above HOLD
 # POSITION SIZING
 # ============================================================
 
-POSITION_MAX_FRACTION = 0.15             # 15% of account max
+# Allow override via DT_POSITION_MAX_FRACTION env var (default: 0.15 = 15% of account max)
+# Can be reduced for high-symbol count trading (e.g., 0.001 = 0.1% for 5000+ symbols)
+def _get_position_max_fraction() -> float:
+    """Get POSITION_MAX_FRACTION from env var with error handling."""
+    try:
+        raw = os.getenv("DT_POSITION_MAX_FRACTION", "0.15")
+        return float(raw) if raw else 0.15
+    except (ValueError, TypeError):
+        return 0.15
+
+POSITION_MAX_FRACTION = _get_position_max_fraction()
 POSITION_PROBE_FRACTION = 0.25           # 25% of full conviction
 POSITION_PRESS_MULT = 1.35               # Scale-up for high P(Hit)
 POSITION_DEFAULT_QTY = 1.0               # Base shares per trade
@@ -193,10 +204,8 @@ def validate_position_fraction(frac: float) -> float:
         Validated fraction clamped to [0.0, POSITION_MAX_FRACTION]
         
     Examples:
-        >>> validate_position_fraction(0.10)
-        0.10
-        >>> validate_position_fraction(0.20)
-        0.15
+        >>> validate_position_fraction(0.05)  # doctest: +SKIP
+        # Returns min(0.05, POSITION_MAX_FRACTION)
         >>> validate_position_fraction(-0.05)
         0.0
     """
@@ -207,6 +216,7 @@ VALID_RANGES: Dict[str, Tuple[float, float]] = {
     "DT_MAX_POSITIONS": (1, 50),
     "DT_MAX_ORDERS_PER_CYCLE": (1, 100),
     "DT_UNIVERSE_SIZE": (10, 5000),
+    "DT_POSITION_MAX_FRACTION": (0.0001, 0.30),  # Position sizing per symbol
     
     # Confidence and probability thresholds
     "DT_EXEC_MIN_CONF": (0.0, 1.0),
