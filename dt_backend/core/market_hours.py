@@ -124,6 +124,45 @@ def _get_us_market_holidays(year: int) -> set[date]:
     return holidays
 
 
+def is_trading_day(session_date: Optional[str] = None) -> bool:
+    """Check if a date is a trading day (weekday, not a holiday).
+    
+    This function checks ONLY if the date itself is tradeable, WITHOUT checking
+    the current time. This is useful for nightly jobs that run after market close
+    but still need to know if the date was a trading day.
+    
+    Args:
+        session_date: ISO date string (YYYY-MM-DD). If None, uses current NY time.
+    
+    Returns:
+        True if the date is a trading day (weekday and not a holiday)
+        False if the date is a weekend or holiday
+    """
+    # Get current time in NY timezone
+    now_ny = datetime.now(NY_TZ)
+    
+    # Parse session_date or use current date
+    if session_date:
+        try:
+            check_date = datetime.fromisoformat(session_date).date()
+        except (ValueError, AttributeError):
+            # If parsing fails, use current date
+            check_date = now_ny.date()
+    else:
+        check_date = now_ny.date()
+    
+    # Check if weekend (Saturday=5, Sunday=6)
+    if check_date.weekday() >= 5:
+        return False
+    
+    # Check if US market holiday
+    holidays = _get_us_market_holidays(check_date.year)
+    if check_date in holidays:
+        return False
+    
+    return True
+
+
 def is_market_open(session_date: Optional[str] = None) -> bool:
     """Check if US equity market is open for the given date.
     

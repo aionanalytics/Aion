@@ -2,7 +2,7 @@
 
 import pytest
 from datetime import date, datetime
-from dt_backend.core.market_hours import is_market_open, get_market_status, _get_us_market_holidays
+from dt_backend.core.market_hours import is_market_open, is_trading_day, get_market_status, _get_us_market_holidays
 
 
 class TestMarketHolidays:
@@ -165,3 +165,57 @@ class TestEdgeCases:
         # MLK Day 2026
         holidays_2026 = _get_us_market_holidays(2026)
         assert date(2026, 1, 19) in holidays_2026
+
+
+class TestIsTradingDay:
+    """Test is_trading_day function (no time check)."""
+    
+    def test_weekend_is_not_trading_day(self):
+        """Test that weekends are not trading days."""
+        # January 6, 2024 is a Saturday
+        assert not is_trading_day("2024-01-06")
+        # January 7, 2024 is a Sunday
+        assert not is_trading_day("2024-01-07")
+    
+    def test_holiday_is_not_trading_day(self):
+        """Test that holidays are not trading days."""
+        # January 15, 2024 is MLK Day
+        assert not is_trading_day("2024-01-15")
+        # March 29, 2024 is Good Friday
+        assert not is_trading_day("2024-03-29")
+        # December 25, 2024 is Christmas
+        assert not is_trading_day("2024-12-25")
+    
+    def test_regular_weekday_is_trading_day(self):
+        """Test that regular weekdays (non-holidays) are trading days."""
+        # January 8, 2024 is a Monday (not a holiday)
+        assert is_trading_day("2024-01-08")
+        # January 9, 2024 is a Tuesday (not a holiday)
+        assert is_trading_day("2024-01-09")
+        # January 5, 2024 is a Friday (not a holiday)
+        assert is_trading_day("2024-01-05")
+    
+    def test_trading_day_true_regardless_of_time(self):
+        """Test that is_trading_day returns True for trading days even when called after hours.
+        
+        This is the key difference from is_market_open: is_trading_day does NOT check
+        the current time, only if the date itself is tradeable.
+        """
+        # January 28, 2026 is a Wednesday (regular trading day)
+        # This should return True regardless of what time it is when the test runs
+        assert is_trading_day("2026-01-28")
+        
+        # January 29, 2026 is a Thursday (regular trading day)
+        assert is_trading_day("2026-01-29")
+    
+    def test_none_date_uses_current(self):
+        """Test that None date uses current NY time."""
+        # This should not raise an error
+        result = is_trading_day(None)
+        assert isinstance(result, bool)
+    
+    def test_invalid_date_format(self):
+        """Test that invalid date format falls back gracefully."""
+        # Should not raise an error, should use current date
+        result = is_trading_day("not-a-date")
+        assert isinstance(result, bool)
