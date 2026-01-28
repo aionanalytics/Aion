@@ -655,7 +655,6 @@ def run_nightly_job(
             except Exception as e_opt:
                 log(f"⚠️ Pass 1 rolling optimizer failed (continuing): {e_opt}")
 
-
             # Update rolling_nervous predictions history (best-effort)
             try:
                 nervous = _read_rolling_nervous() or {}
@@ -705,21 +704,20 @@ def run_nightly_job(
             _write_summary(summary)
             raise
 
-        # 11) Rolling optimizer - PASS 2 (safety re-optimization after all phases)
+        # 11) Rolling optimizer - PASS 2 (safety re-optimization from disk)
         key, title = PIPELINE[11]
         _phase(title, 12, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(optimize_rolling_data, "backend.services.rolling_optimizer.optimize_rolling_data")
             
-            # Pass 2: Re-read rolling to catch any changes from intermediate phases
-            rolling_final = _read_rolling_with_retry(attempts=5, sleep_secs=2.0)
-            
-            # Update swing section only - DT section updated by intraday job
-            res = optimize_rolling_data(section="swing", rolling_data=rolling_final)
+            # Pass 2: Read from disk to catch any changes from intermediate phases
+            # (policy, execution, etc. may have modified rolling file)
+            # This ensures rolling_optimized.json.gz reflects final state
+            res = optimize_rolling_data(section="swing")
             _record_ok(summary, key, res, t0)
             _write_summary(summary)
-            log("✅ Pass 2 rolling optimization complete (final safety re-optimization).")
+            log("✅ Pass 2 rolling optimization complete (final re-optimization from disk).")
         except Exception as e:
             _record_err(summary, key, e, t0)
             _write_summary(summary)
