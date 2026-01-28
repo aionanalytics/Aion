@@ -43,6 +43,11 @@ except Exception:  # pragma: no cover
     run_continuous_learning_intraday = None  # type: ignore
 
 try:
+    from dt_backend.ml.predict_intraday_to_rolling import attach_intraday_predictions
+except Exception:  # pragma: no cover
+    attach_intraday_predictions = None  # type: ignore
+
+try:
     from dt_backend.core.dt_brain import read_dt_brain, write_dt_brain
 except Exception:  # pragma: no cover
     read_dt_brain = None  # type: ignore
@@ -202,6 +207,7 @@ def run_dt_nightly_job(session_date: Optional[str] = None) -> Dict[str, Any]:
             "metrics_file": None,
             "continuous_learning": "skipped",
             "knob_tuner": {"status": "skipped"},
+            "predictions": {"status": "skipped"},
             "note": "Not a trading day (weekend/holiday)"
         }
 
@@ -277,11 +283,25 @@ def run_dt_nightly_job(session_date: Optional[str] = None) -> Dict[str, Any]:
     except Exception as e_tune:
         summary["knob_tuner"] = {"status": "error", "error": str(e_tune)[:200]}
 
+    # Phase 7: Attach intraday predictions to rolling
+    try:
+        if callable(attach_intraday_predictions):
+            pred_result = attach_intraday_predictions()  # type: ignore[call-arg]
+            log(f"[dt_nightly] ✅ Attached predictions_dt for {pred_result.get('predicted', 0)} symbols")
+            summary["predictions"] = pred_result
+        else:
+            summary["predictions"] = {"status": "missing"}
+    except Exception as e_pred:
+        warn(f"[dt_nightly] ⚠️ failed to attach predictions: {e_pred}")
+        summary["predictions"] = {"status": "error", "error": str(e_pred)[:200]}
+
     _stamp_brain(session_date, summary)
 
+    pred_status = summary.get("predictions", {}).get("status", "unknown")
+    pred_count = summary.get("predictions", {}).get("predicted", 0)
     log(
         "[dt_nightly] ✅ done "
         f"session={session_date} trades={total_trades} win_rate={win_rate:.3f} pnl={total_pnl:.2f} "
-        f"cl={cl_status}"
+        f"cl={cl_status} predictions={pred_count}/{pred_status}"
     )
     return summary
