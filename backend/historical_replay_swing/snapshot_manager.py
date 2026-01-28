@@ -116,11 +116,12 @@ class SnapshotManager:
 def capture_eod_snapshot() -> EODSnapshot:
     """Capture current market state as snapshot."""
     from backend.core.data_pipeline import _read_rolling
+    from backend.historical_replay_swing.types import get_load_universe
     
     date_str = datetime.now(timezone.utc).date().isoformat()
     
-    # Load current data
-    from backend.services.backfill_history import load_universe
+    # Load current data (using lazy import to avoid circular dependency)
+    load_universe = get_load_universe()
     
     # Get rolling state
     rolling_state = _read_rolling() or {}

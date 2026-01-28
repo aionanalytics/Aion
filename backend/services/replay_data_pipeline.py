@@ -22,8 +22,9 @@ def get_replay_date() -> Optional[str]:
 
 def load_bars_for_replay(date: str) -> pd.DataFrame:
     """Load bars from snapshot (not live)."""
-    from backend.historical_replay_swing.snapshot_manager import SnapshotManager
     from backend.core.config import PATHS
+    # Lazy import to avoid circular dependency
+    from backend.historical_replay_swing.snapshot_manager import SnapshotManager
     
     manager = SnapshotManager(Path(PATHS["swing_replay_snapshots"]))
     snapshot = manager.load_snapshot(date)
@@ -32,8 +33,9 @@ def load_bars_for_replay(date: str) -> pd.DataFrame:
 
 def load_fundamentals_for_replay(date: str) -> Dict[str, Any]:
     """Load fundamentals from snapshot."""
-    from backend.historical_replay_swing.snapshot_manager import SnapshotManager
     from backend.core.config import PATHS
+    # Lazy import to avoid circular dependency
+    from backend.historical_replay_swing.snapshot_manager import SnapshotManager
     
     manager = SnapshotManager(Path(PATHS["swing_replay_snapshots"]))
     snapshot = manager.load_snapshot(date)
@@ -42,8 +44,9 @@ def load_fundamentals_for_replay(date: str) -> Dict[str, Any]:
 
 def load_macro_for_replay(date: str) -> Dict[str, Any]:
     """Load macro from snapshot."""
-    from backend.historical_replay_swing.snapshot_manager import SnapshotManager
     from backend.core.config import PATHS
+    # Lazy import to avoid circular dependency
+    from backend.historical_replay_swing.snapshot_manager import SnapshotManager
     
     manager = SnapshotManager(Path(PATHS["swing_replay_snapshots"]))
     snapshot = manager.load_snapshot(date)
@@ -52,8 +55,9 @@ def load_macro_for_replay(date: str) -> Dict[str, Any]:
 
 def load_rolling_for_replay(date: str) -> Dict[str, Any]:
     """Load rolling cache from snapshot."""
-    from backend.historical_replay_swing.snapshot_manager import SnapshotManager
     from backend.core.config import PATHS
+    # Lazy import to avoid circular dependency
+    from backend.historical_replay_swing.snapshot_manager import SnapshotManager
     
     manager = SnapshotManager(Path(PATHS["swing_replay_snapshots"]))
     snapshot = manager.load_snapshot(date)
