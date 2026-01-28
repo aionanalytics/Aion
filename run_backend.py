@@ -291,6 +291,15 @@ if __name__ == "__main__":
     dt_worker_proc = launch([sys.executable, "-m", dt_worker_module], dt_worker_name)
     threading.Thread(target=pipe_output, args=(dt_worker_proc, dt_worker_name), daemon=True).start()
 
+    # Backend scheduler: run scheduled jobs (nightly_job, news_fetcher, etc.)
+    backend_scheduler_proc = None
+    if module_exists("backend.scheduler_runner"):
+        backend_scheduler_proc = launch([sys.executable, "-m", "backend.scheduler_runner"], "backend_scheduler")
+        threading.Thread(target=pipe_output, args=(backend_scheduler_proc, "backend_scheduler"), daemon=True).start()
+        print("   ✓ backend scheduler → running scheduled jobs (nightly_job at 17:30 MT)", flush=True)
+    else:
+        print("   ⚠️ backend scheduler → module not found, skipping", flush=True)
+
     replay_proc = launch(
         uvicorn_cmd(
             "replay_service:app",
@@ -322,6 +331,15 @@ if __name__ == "__main__":
                 dt_worker_proc = launch([sys.executable, "-m", dt_worker_module], dt_worker_name)
                 threading.Thread(target=pipe_output, args=(dt_worker_proc, dt_worker_name), daemon=True).start()
 
+            if backend_scheduler_proc is not None and backend_scheduler_proc.poll() is not None:
+                rc = backend_scheduler_proc.returncode
+                msg = f"[supervisor] ⚠️ backend_scheduler exited (code={rc}) — restarting…"
+                print(msg, flush=True)
+                append_log(msg)
+                time.sleep(3)
+                backend_scheduler_proc = launch([sys.executable, "-m", "backend.scheduler_runner"], "backend_scheduler")
+                threading.Thread(target=pipe_output, args=(backend_scheduler_proc, "backend_scheduler"), daemon=True).start()
+
             if replay_proc is not None and replay_proc.poll() is not None:
                 rc = replay_proc.returncode
                 msg = f"[supervisor] ⚠️ replay_service exited (code={rc}) — continuing without it"
@@ -337,6 +355,7 @@ if __name__ == "__main__":
 
     finally:
         shutdown_process(replay_proc, "replay_service")
+        shutdown_process(backend_scheduler_proc, "backend_scheduler")
         shutdown_process(dt_worker_proc, dt_worker_name)
         shutdown_process(dt_proc, "dt_backend")
         shutdown_process(backend_primary_proc, "backend")

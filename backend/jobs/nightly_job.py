@@ -91,6 +91,31 @@ def _read_rolling_with_retry(attempts: int = 5, sleep_secs: float = 2.0) -> Dict
     return last or {}
 
 
+def _save_rolling_with_retry(rolling: Dict[str, Any], attempts: int = 3, sleep_secs: float = 1.0) -> None:
+    """Best-effort save for rolling_body with retry logic.
+    
+    Helps handle transient file system issues or concurrent access problems.
+    Raises the last exception if all attempts fail.
+    """
+    last_error = None
+    for i in range(max(1, int(attempts))):
+        try:
+            save_rolling(rolling)
+            if i > 0:
+                log(f"[nightly_job] ✓ save_rolling succeeded on retry attempt {i+1}/{attempts}")
+            return
+        except Exception as e:
+            last_error = e
+            if i < attempts - 1:
+                log(f"[nightly_job] ⚠️ save_rolling failed (attempt {i+1}/{attempts}), retrying: {e}")
+                time.sleep(float(sleep_secs))
+            else:
+                log(f"[nightly_job] ❌ save_rolling failed after {attempts} attempts: {e}")
+    
+    if last_error:
+        raise last_error
+
+
 def _append_predictions_history(
     nervous: Dict[str, Any],
     preds: Dict[str, Any],
@@ -613,11 +638,14 @@ def run_nightly_job(
                     rolling[sym] = node
                     updated_syms += 1
 
-            # Persist rolling
+            # Persist rolling with retry logic
             try:
-                save_rolling(rolling)
+                _save_rolling_with_retry(rolling, attempts=3, sleep_secs=1.0)
+                log(f"[nightly_job] ✓ Rolling file updated with {updated_syms} predictions")
             except Exception as e_save:
-                log(f"[nightly_job] ⚠️ save_rolling after predict_all failed (continuing): {e_save}")
+                log(f"[nightly_job] ❌ save_rolling failed after retries (CRITICAL): {e_save}")
+                # This is critical - predictions generated but not persisted
+                raise RuntimeError(f"Failed to persist predictions to rolling file: {e_save}") from e_save
 
             # Update rolling_nervous predictions history (best-effort)
             try:

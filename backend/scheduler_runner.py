@@ -22,7 +22,7 @@ import os
 import sys
 import time
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any
 
@@ -74,7 +74,7 @@ def _ensure_log_dir() -> None:
 
 def log(msg: str) -> None:
     _ensure_log_dir()
-    ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     line = f"[scheduler] {ts} {msg}"
     print(line, flush=True)
     with LOG_FILE.open("a", encoding="utf-8", errors="replace") as f:
@@ -93,7 +93,7 @@ def _build_cmd(job: Dict[str, Any]) -> list[str]:
 
 
 def _job_log_path(job: Dict[str, Any]) -> Path:
-    date_tag = datetime.utcnow().strftime("%Y%m%d")
+    date_tag = datetime.now(timezone.utc).strftime("%Y%m%d")
     return LOG_DIR / f"{job['name']}_{date_tag}.log"
 
 
@@ -114,7 +114,7 @@ def run_job(job: Dict[str, Any]) -> None:
     child_env.setdefault("PYTHONUTF8", "1")
 
     with job_log.open("ab") as f:
-        f.write(f"\n===== JOB START {datetime.utcnow().isoformat()} =====\n".encode("utf-8", errors="replace"))
+        f.write(f"\n===== JOB START {datetime.now(timezone.utc).isoformat()} =====\n".encode("utf-8", errors="replace"))
 
         proc = subprocess.Popen(
             cmd,
@@ -147,7 +147,7 @@ def run_job(job: Dict[str, Any]) -> None:
         proc.wait()
 
         f.write(
-            f"\n===== JOB END {datetime.utcnow().isoformat()} exit_code={proc.returncode} =====\n"
+            f"\n===== JOB END {datetime.now(timezone.utc).isoformat()} exit_code={proc.returncode} =====\n"
             .encode("utf-8", errors="replace")
         )
 

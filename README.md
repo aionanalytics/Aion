@@ -39,6 +39,7 @@ python run_backend.py
 
 The platform will start:
 - **Backend API** (port 8000) - Unified backend for all endpoints
+- **Backend Scheduler** - Automated jobs (nightly ML at 17:30 MT, news, insights, EOD bots)
 - **DT Backend API** (port 8010) - Intraday trading
 - **DT Scheduler** - Live market data loop
 - **Replay Service** (port 8020) - Historical replay
@@ -188,6 +189,7 @@ They share a common storage layout under `data/`, `ml_data/`, `ml_data_dt/`, `an
 
 - **Nightly (backend)**:
   - Runs once per day (or on schedule) after market close / pre-market
+  - **Automated by backend scheduler** - Triggers at 17:30 MT daily
   - Refreshes fundamentals, macro, sentiment
   - Builds EOD features and datasets
   - Trains / evaluates models
@@ -196,12 +198,32 @@ They share a common storage layout under `data/`, `ml_data/`, `ml_data_dt/`, `an
 
 - **Intraday (dt_backend)**:
   - Runs during market hours
+  - **Automated by DT scheduler** - Continuous loop during market hours
   - Pulls 1m/5m bars (Alpaca, with fallbacks)
   - Maintains intraday rolling state
   - Computes technical + contextual intraday features
   - Runs intraday ML models (LightGBM today, LSTM/Transformer later)
   - Executes intraday trades against broker (paper/live)
   - Logs PnL and bot actions
+
+### Automated Schedulers
+
+The platform includes two schedulers for fully automated operation:
+
+- **Backend Scheduler** (`backend/scheduler_runner.py`):
+  - Runs nightly ML pipeline at 17:30 MT
+  - Collects news 3x daily (07:45, 11:45, 14:45 MT)
+  - Builds evening insights at 18:00 MT
+  - Manages swing bot rebalancing (premarket, intraday, close)
+  - Automatically started by `run_backend.py`
+  - Logs to `logs/scheduler/`
+
+- **DT Scheduler** (`dt_backend/jobs/dt_scheduler.py`):
+  - Runs intraday cycles during market hours
+  - Fetches live bars every 60 seconds
+  - Executes trading cycles every 60 seconds
+  - Automatically started by `run_backend.py`
+  - Auto-restarts if crashed
 
 ---
 
