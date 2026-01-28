@@ -93,8 +93,8 @@ def _is_market_open_on_date(date_str: str) -> bool:
     """
     try:
         # Import market_hours module if available
-        from dt_backend.core.market_hours import is_market_open
-        return is_market_open(date_str)
+        from dt_backend.core.market_hours import is_trading_day
+        return is_trading_day(date_str)
     except Exception:
         # Fallback: simple weekday check (no holiday calendar)
         try:

@@ -187,11 +187,12 @@ def run_dt_nightly_job(session_date: Optional[str] = None) -> Dict[str, Any]:
     """
     session_date = str(session_date or _now_ny_iso_date())
     
-    # ✅ CHECK IF MARKET IS CLOSED (weekends, holidays, after-hours)
-    from dt_backend.core.market_hours import is_market_open
+    # ✅ CHECK IF DATE IS A TRADING DAY (weekends, holidays)
+    # Use is_trading_day() instead of is_market_open() so nightly jobs can run after hours
+    from dt_backend.core.market_hours import is_trading_day
     
-    if not is_market_open(session_date):
-        log(f"[dt_nightly] ⏸️ Market closed for {session_date} (weekend/holiday/after-hours), skipping")
+    if not is_trading_day(session_date):
+        log(f"[dt_nightly] ⏸️ Not a trading day for {session_date} (weekend/holiday), skipping")
         return {
             "status": "ok",
             "session_date": session_date,
@@ -201,7 +202,7 @@ def run_dt_nightly_job(session_date: Optional[str] = None) -> Dict[str, Any]:
             "metrics_file": None,
             "continuous_learning": "skipped",
             "knob_tuner": {"status": "skipped"},
-            "note": "Market closed (weekend/holiday/after-hours)"
+            "note": "Not a trading day (weekend/holiday)"
         }
 
     brokers = _brokers_dir()
