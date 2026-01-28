@@ -39,6 +39,7 @@ Step 3 (v1.6.0):
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -81,6 +82,30 @@ NO_SIGNAL_THR: Dict[str, float] = {
 
 # extremely tiny numerical noise guard (never “signal gating”)
 EPS_RET = 1e-12
+
+
+# ---------------------------------------------------------------------
+# Disk space helper
+# ---------------------------------------------------------------------
+def check_disk_space(path: Path, required_mb: int = 100) -> bool:
+    """
+    Check if sufficient disk space is available before writing.
+    
+    Args:
+        path: Path to check (uses parent directory for disk stats)
+        required_mb: Minimum required free space in MB
+    
+    Returns:
+        True if sufficient space available, False otherwise
+    """
+    try:
+        stat = shutil.disk_usage(path.parent)
+        available_mb = stat.free / (1024 * 1024)
+        return available_mb >= required_mb
+    except Exception as e:
+        log(f"[prediction_logger] ⚠️ Failed to check disk space: {e}")
+        # On error, allow write to proceed (fail-open for safety)
+        return True
 
 
 def _file_timestamp() -> str:
@@ -602,6 +627,11 @@ def _append_ledger(
     if not lines:
         return 0
 
+    # Check disk space before writing
+    if not check_disk_space(LEDGER_PATH):
+        log("[prediction_logger] ❌ Insufficient disk space")
+        raise IOError("Disk full: cannot write prediction ledger")
+
     try:
         with LEDGER_PATH.open("a", encoding="utf-8") as f:
             for ln in lines:
@@ -825,6 +855,11 @@ def log_predictions(
     if save_to_file:
         latest_path = LOG_DIR / "latest_predictions.json"
         ts_path = LOG_DIR / f"predictions_{_file_timestamp()}.json"
+
+        # Check disk space before writing
+        if not check_disk_space(latest_path):
+            log("[prediction_logger] ❌ Insufficient disk space")
+            raise IOError("Disk full: cannot write prediction files")
 
         try:
             txt = json.dumps(payload, indent=2)
