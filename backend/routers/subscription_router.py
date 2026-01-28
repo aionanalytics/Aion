@@ -104,8 +104,24 @@ async def update_payment(
             detail="No subscription found"
         )
     
-    # TODO: Implement Stripe payment method update
-    # For now, return success
+    # Update payment method in Stripe
+    if subscription.stripe_customer_id:
+        try:
+            from backend.core.stripe_service import update_payment_method
+            update_payment_method(subscription.stripe_customer_id, payment_method_id)
+            
+            # Update subscription status if it was past_due
+            if subscription.status == "past_due":
+                subscription.status = "active"
+                db.commit()
+            
+            return {"message": "Payment method updated successfully"}
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Failed to update payment method: {str(e)}"
+            )
+    
     return {"message": "Payment method updated successfully"}
 
 

@@ -104,6 +104,11 @@ try:
 except ImportError:
     admin_auth_router = None
 
+try:
+    from backend.routers.webhook_router import router as webhook_router
+except ImportError:
+    webhook_router = None
+
 # Include all routers
 ROUTERS = [
     # NEW: Consolidated routers (6 domain routers)
@@ -120,7 +125,7 @@ ROUTERS = [
 ]
 
 # Add optional routers if available
-for router in [model_router, testing_router, intraday_router, replay_router, page_data_router, live_prices_router, auth_router, subscription_router, admin_auth_router]:
+for router in [model_router, testing_router, intraday_router, replay_router, page_data_router, live_prices_router, auth_router, subscription_router, admin_auth_router, webhook_router]:
     if router is not None:
         ROUTERS.append(router)
 

@@ -31,6 +31,7 @@ async def signup(
     addons: list[str] = [],
     billing_frequency: str = "monthly",
     early_adopter: bool = False,
+    payment_method_id: str = None,
     db: Session = Depends(get_db)
 ):
     """
@@ -43,6 +44,7 @@ async def signup(
         addons: List of add-ons (analytics, backup)
         billing_frequency: Billing frequency (monthly, annual)
         early_adopter: Whether to apply early adopter discount
+        payment_method_id: Stripe payment method ID (optional)
         db: Database session
         
     Returns:
@@ -62,6 +64,21 @@ async def signup(
         )
         subscription = create_subscription(db, str(user.id), subscription_data)
         
+        # Process payment if payment method provided
+        if payment_method_id:
+            from backend.core.stripe_service import process_signup_payment
+            success, error, payment_data = process_signup_payment(
+                db, subscription, payment_method_id, email
+            )
+            
+            if not success:
+                # Rollback user creation if payment fails
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                    detail=error or "Payment processing failed"
+                )
+        
         # Generate tokens
         tokens = generate_tokens(db, user)
         
@@ -72,6 +89,8 @@ async def signup(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
