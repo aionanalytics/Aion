@@ -239,7 +239,9 @@ class TestHelperFunctions:
 
     def test_validate_position_fraction_above_max(self):
         """validate_position_fraction should clamp to POSITION_MAX_FRACTION."""
-        assert validate_position_fraction(0.20) == POSITION_MAX_FRACTION
+        # Test with a value that's definitely above the max (2x the max)
+        test_val = POSITION_MAX_FRACTION * 2.0
+        assert validate_position_fraction(test_val) == POSITION_MAX_FRACTION
 
     def test_validate_position_fraction_below_zero(self):
         """validate_position_fraction should clamp to 0.0."""
