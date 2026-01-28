@@ -71,11 +71,14 @@ except Exception:
 # ==============================================================================
 # MAIN DRIVER
 # ==============================================================================
-def run_intraday_cycle() -> Dict[str, Any]:
+def run_intraday_cycle() -> tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Perform a full intraday inference cycle and return structured results.
 
     This is what the /api/intraday/refresh endpoint will call.
+    
+    Returns:
+        tuple: (summary dict, rolling dict) to enable dual-pass optimization
     """
 
     summary = {
@@ -92,7 +95,7 @@ def run_intraday_cycle() -> Dict[str, Any]:
         if not rolling:
             summary["errors"].append("rolling_cache_empty")
             log("[intraday_runner] ❌ Rolling is empty. Cannot run intraday cycle.")
-            return summary
+            return summary, {}
 
         # ---------------------------------------------------
         # 1) CONTEXT
@@ -207,13 +210,13 @@ def run_intraday_cycle() -> Dict[str, Any]:
 
         log(f"[intraday_runner] ✅ Finished intraday cycle → updated={summary['updated_symbols']}")
 
-        return summary
+        return summary, rolling
 
     except Exception as fatal:
         summary["errors"].append(f"fatal_error: {fatal}")
         log(f"[intraday_runner] ❌ fatal error: {fatal}")
         log(traceback.format_exc())
-        return summary
+        return summary, {}
 
 
 # ==============================================================================

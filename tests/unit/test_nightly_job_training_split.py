@@ -43,9 +43,9 @@ class TestNightlyJobTrainingSplit:
         """Test that TOTAL_PHASES reflects the correct count after split."""
         from backend.jobs.nightly_job import PIPELINE, TOTAL_PHASES
         
-        # Count should be 22 (21 original + 1 for the split)
-        assert len(PIPELINE) == 22, f"Expected 22 phases, got {len(PIPELINE)}"
-        assert TOTAL_PHASES == 22, f"TOTAL_PHASES should be 22, got {TOTAL_PHASES}"
+        # Count should be 23 (22 original + rolling_optimizer)
+        assert len(PIPELINE) == 23, f"Expected 23 phases, got {len(PIPELINE)}"
+        assert TOTAL_PHASES == 23, f"TOTAL_PHASES should be 23, got {TOTAL_PHASES}"
     
     def test_pipeline_training_phases_at_correct_indices(self):
         """Test that training phases are at indices 8 and 9."""
@@ -100,6 +100,7 @@ class TestNightlyJobTrainingSplit:
             "training_sector",    # NEW: Phase 9A
             "training_global",    # NEW: Phase 9B
             "predictions",
+            "rolling_optimizer",  # NEW: Phase 11 - optimize rolling data
             "prediction_logger",
             "accuracy_engine",
             "context",
@@ -177,17 +178,18 @@ class TestNightlyJobPhaseNumbering:
             "# 9A) Sector Training": "9",
             "# 9B) Global Training": "10",
             "# 10) Predictions": "11",
-            "# 11) Prediction logger": "12",
-            "# 12) Accuracy engine": "13",
-            "# 13) Context state": "14",
-            "# 14) Regime detection": "15",
-            "# 15) Continuous learning": "16",
-            "# 16) Performance aggregation": "17",
-            "# 17) AION brain update": "18",
-            "# 18) Policy engine": "19",
-            "# 19) Swing Bot EOD": "20",
-            "# 20) Insights builder": "21",
-            "# 21) Supervisor agent": "22",
+            "# 11) Rolling optimizer": "12",
+            "# 12) Prediction logger": "13",
+            "# 13) Accuracy engine": "14",
+            "# 14) Context state": "15",
+            "# 15) Regime detection": "16",
+            "# 16) Continuous learning": "17",
+            "# 17) Performance aggregation": "18",
+            "# 18) AION brain update": "19",
+            "# 19) Policy engine": "20",
+            "# 20) Swing Bot EOD": "21",
+            "# 21) Insights builder": "22",
+            "# 22) Supervisor agent": "23",
         }
         
         for i, line in enumerate(lines):
@@ -217,17 +219,18 @@ class TestNightlyJobPhaseNumbering:
             "# 9A) Sector Training": "PIPELINE[8]",
             "# 9B) Global Training": "PIPELINE[9]",
             "# 10) Predictions": "PIPELINE[10]",
-            "# 11) Prediction logger": "PIPELINE[11]",
-            "# 12) Accuracy engine": "PIPELINE[12]",
-            "# 13) Context state": "PIPELINE[13]",
-            "# 14) Regime detection": "PIPELINE[14]",
-            "# 15) Continuous learning": "PIPELINE[15]",
-            "# 16) Performance aggregation": "PIPELINE[16]",
-            "# 17) AION brain update": "PIPELINE[17]",
-            "# 18) Policy engine": "PIPELINE[18]",
-            "# 19) Swing Bot EOD": "PIPELINE[19]",
-            "# 20) Insights builder": "PIPELINE[20]",
-            "# 21) Supervisor agent": "PIPELINE[21]",
+            "# 11) Rolling optimizer": "PIPELINE[11]",
+            "# 12) Prediction logger": "PIPELINE[12]",
+            "# 13) Accuracy engine": "PIPELINE[13]",
+            "# 14) Context state": "PIPELINE[14]",
+            "# 15) Regime detection": "PIPELINE[15]",
+            "# 16) Continuous learning": "PIPELINE[16]",
+            "# 17) Performance aggregation": "PIPELINE[17]",
+            "# 18) AION brain update": "PIPELINE[18]",
+            "# 19) Policy engine": "PIPELINE[19]",
+            "# 20) Swing Bot EOD": "PIPELINE[20]",
+            "# 21) Insights builder": "PIPELINE[21]",
+            "# 22) Supervisor agent": "PIPELINE[22]",
         }
         
         for i, line in enumerate(lines):
