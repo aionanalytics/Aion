@@ -48,6 +48,15 @@ from dt_backend.core.constants_dt import (
     REGIME_EXPOSURE,
 )
 
+# Import outcome logger for autonomous tuning
+try:
+    from backend.services.swing_outcome_logger import append_swing_outcome
+except Exception:
+    # Gracefully handle if outcome logger not available
+    def append_swing_outcome(**kwargs):  # type: ignore
+        pass
+from backend.tuning.swing_profile_loader import load_swing_profile
+
 # Import alerting module for Slack notifications
 try:
     from backend.monitoring.alerting import alert_swing
@@ -124,8 +133,6 @@ def apply_swing_env_overrides(cfg: "SwingBotConfig") -> "SwingBotConfig":
     cfg.ev_power = max(0.25, min(3.0, float(cfg.ev_power)))
 
     return cfg
-from backend.bots.brains.swing_brain_v2 import rank_universe_v2
-from backend.tuning.swing_profile_loader import load_swing_profile
 
 # ---------------------------------------------------------------------
 # Config & logging
@@ -357,6 +364,12 @@ class Position:
     goal_qty: float = 0.0           # desired full size in shares at last rebalance
     build_stage: int = 0            # 0 = none, 1 = starter, 2..N = adds
     last_add_ts: str = ""           # ISO8601 Z
+    
+    # Outcome tracking for autonomous tuning
+    entry_confidence: float = 0.0   # Confidence at entry
+    expected_return: float = 0.0    # Expected return from model
+    entry_ts: str = ""              # Entry timestamp
+    regime_entry: str = "unknown"   # Market regime at entry
 
 
 @dataclass
@@ -382,6 +395,10 @@ class BotState:
                 goal_qty=_safe_float(pd.get("goal_qty"), 0.0),
                 build_stage=int(_safe_float(pd.get("build_stage"), 0.0) or 0),
                 last_add_ts=str(pd.get("last_add_ts") or ""),
+                entry_confidence=_safe_float(pd.get("entry_confidence"), 0.0),
+                expected_return=_safe_float(pd.get("expected_return"), 0.0),
+                entry_ts=str(pd.get("entry_ts") or pd.get("last_add_ts") or ""),
+                regime_entry=str(pd.get("regime_entry") or "unknown"),
             )
         return cls(
             cash=cash,
@@ -735,6 +752,86 @@ class SwingBot:
             f"positions={len(state.positions)} cash={state.cash:.2f} "
             f"equity={state.last_equity:.2f}"
         )
+
+    # -------------------- Trade Outcome Logging -------------------- #
+
+    def _log_trade_outcome(
+        self,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        exit_price: float,
+        qty: float,
+        exit_reason: str,
+        position: Optional[Position] = None,
+        rolling: Optional[Dict[str, dict]] = None
+    ) -> None:
+        """
+        Log trade outcome for autonomous tuning.
+        
+        Args:
+            symbol: Stock symbol
+            side: Trade side (BUY/SELL)
+            entry_price: Entry price
+            exit_price: Exit price
+            qty: Quantity
+            exit_reason: Reason for exit
+            position: Position object with entry metadata
+            rolling: Rolling data for regime detection
+        """
+        try:
+            # Get entry metadata from position
+            if position:
+                entry_confidence = getattr(position, "entry_confidence", 0.0)
+                expected_return = getattr(position, "expected_return", 0.0)
+                entry_ts = getattr(position, "entry_ts", "") or getattr(position, "last_add_ts", "")
+                regime_entry = getattr(position, "regime_entry", "unknown")
+            else:
+                entry_confidence = 0.0
+                expected_return = 0.0
+                entry_ts = ""
+                regime_entry = "unknown"
+            
+            # Get current regime from rolling data
+            regime_exit = regime_entry  # Default to same regime
+            if rolling:
+                g = rolling.get("_GLOBAL") if isinstance(rolling, dict) else None
+                g = g if isinstance(g, dict) else {}
+                reg = g.get("regime") if isinstance(g.get("regime"), dict) else {}
+                regime_exit = str((reg or {}).get("label") or "unknown").strip().lower()
+            
+            # Calculate hold time
+            hold_hours = 0.0
+            if entry_ts:
+                try:
+                    from datetime import datetime, timezone
+                    entry_dt = datetime.fromisoformat(entry_ts.replace("Z", "+00:00"))
+                    exit_dt = datetime.now(timezone.utc)
+                    hold_hours = (exit_dt - entry_dt).total_seconds() / 3600.0
+                except Exception:
+                    pass
+            
+            # Log outcome
+            append_swing_outcome(
+                bot_key=self.cfg.bot_key,
+                symbol=symbol,
+                side=side,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                qty=qty,
+                entry_confidence=entry_confidence,
+                expected_return=expected_return,
+                hold_hours=hold_hours,
+                exit_reason=exit_reason,
+                regime_entry=regime_entry,
+                regime_exit=regime_exit,
+                entry_ts=entry_ts,
+                stop_loss_used=self.cfg.stop_loss_pct,
+                take_profit_used=self.cfg.take_profit_pct
+            )
+        except Exception as e:
+            # Don't fail the bot if outcome logging fails
+            log(f"[{self.cfg.bot_key}] ⚠️ Failed to log trade outcome: {e}")
 
     # -------------------- AI Ranking & Weights -------------------- #
 
@@ -1271,6 +1368,19 @@ Portfolio:
                     proceeds = pos.qty * px
                     state.cash += proceeds
                     pnl = (px - pos.entry) * pos.qty
+                    
+                    # Log trade outcome
+                    self._log_trade_outcome(
+                        symbol=sym,
+                        side="SELL",
+                        entry_price=pos.entry,
+                        exit_price=px,
+                        qty=pos.qty,
+                        exit_reason="REMOVE_FROM_UNIVERSE",
+                        position=pos,
+                        rolling=rolling
+                    )
+                    
                     trades.append(
                         Trade(
                             t=_now_iso(),
@@ -1338,6 +1448,13 @@ Portfolio:
                 if pos is None or pos.qty <= 0:
                     buy_qty = min(buy_qty, max(0.0, desired_qty * float(self.cfg.starter_fraction)))
                     if buy_qty > 0:
+                        # Get entry metadata for outcome tracking
+                        exp_ret = self._extract_horizon_pred(node) if node else 0.0
+                        g = rolling.get("_GLOBAL") if isinstance(rolling, dict) else None
+                        g = g if isinstance(g, dict) else {}
+                        reg = g.get("regime") if isinstance(g.get("regime"), dict) else {}
+                        regime = str((reg or {}).get("label") or "unknown").strip().lower()
+                        
                         state.positions[sym] = Position(
                             qty=float(buy_qty),
                             entry=float(px),
@@ -1346,6 +1463,10 @@ Portfolio:
                             goal_qty=float(desired_qty),
                             build_stage=1,
                             last_add_ts=_now_iso(),
+                            entry_confidence=float(sig_conf),
+                            expected_return=float(exp_ret),
+                            entry_ts=_now_iso(),
+                            regime_entry=regime,
                         )
                         pos = state.positions[sym]
 
@@ -1414,6 +1535,19 @@ Portfolio:
                 sell_qty = min(qty, pos.qty)
                 state.cash += sell_qty * px
                 pnl = (px - pos.entry) * sell_qty
+                
+                # Log trade outcome
+                self._log_trade_outcome(
+                    symbol=sym,
+                    side="SELL",
+                    entry_price=pos.entry,
+                    exit_price=px,
+                    qty=sell_qty,
+                    exit_reason="TARGET_REBALANCE",
+                    position=pos,
+                    rolling=rolling
+                )
+                
                 trades.append(
                     Trade(
                         t=_now_iso(),
@@ -1472,6 +1606,19 @@ Portfolio:
             if px <= pos.stop:
                 pnl = (px - pos.entry) * pos.qty
                 state.cash += pos.qty * px
+                
+                # Log trade outcome
+                self._log_trade_outcome(
+                    symbol=sym,
+                    side="SELL",
+                    entry_price=pos.entry,
+                    exit_price=px,
+                    qty=pos.qty,
+                    exit_reason="STOP_LOSS",
+                    position=pos,
+                    rolling=rolling
+                )
+                
                 trades.append(
                     Trade(
                         t=_now_iso(),
@@ -1503,6 +1650,19 @@ Portfolio:
             if px >= pos.target:
                 pnl = (px - pos.entry) * pos.qty
                 state.cash += pos.qty * px
+                
+                # Log trade outcome
+                self._log_trade_outcome(
+                    symbol=sym,
+                    side="SELL",
+                    entry_price=pos.entry,
+                    exit_price=px,
+                    qty=pos.qty,
+                    exit_reason="TAKE_PROFIT",
+                    position=pos,
+                    rolling=rolling
+                )
+                
                 trades.append(
                     Trade(
                         t=_now_iso(),
@@ -1534,6 +1694,19 @@ Portfolio:
                 pnl = (px - pos.entry) * pos.qty
                 if pnl <= (0.01 * pos.entry * pos.qty):
                     state.cash += pos.qty * px
+                    
+                    # Log trade outcome
+                    self._log_trade_outcome(
+                        symbol=sym,
+                        side="SELL",
+                        entry_price=pos.entry,
+                        exit_price=px,
+                        qty=pos.qty,
+                        exit_reason=f"TIME_STOP",
+                        position=pos,
+                        rolling=rolling
+                    )
+                    
                     trades.append(
                         Trade(
                             t=_now_iso(),
@@ -1572,6 +1745,19 @@ Portfolio:
                     if pos.pending_exit >= self.cfg.exit_confirmations:
                         pnl = (px - pos.entry) * pos.qty
                         state.cash += pos.qty * px
+                        
+                        # Log trade outcome
+                        self._log_trade_outcome(
+                            symbol=sym,
+                            side="SELL",
+                            entry_price=pos.entry,
+                            exit_price=px,
+                            qty=pos.qty,
+                            exit_reason="AI_CONFIRM",
+                            position=pos,
+                            rolling=rolling
+                        )
+                        
                         trades.append(
                             Trade(
                                 t=_now_iso(),
@@ -1668,8 +1854,8 @@ Portfolio:
             pass
 
         insights = self.load_insights()
-        # Phase 5: regime playbook profile (soft gates + tier thresholds)
-        tier_params: dict = {}
+        # Phase 5: regime playbook profile (conf_threshold adjustments)
+        # Note: build_ai_ranked_universe uses self.cfg.conf_threshold internally
         try:
             g = rolling.get("_GLOBAL") if isinstance(rolling.get("_GLOBAL"), dict) else {}
             reg_label = str(
@@ -1695,27 +1881,19 @@ Portfolio:
 
                 g["swing_playbook_profile"] = {"name": str(playbook.get("label") or ""), "ts": _now_iso()}
                 rolling["_GLOBAL"] = g
-
-                if isinstance(playbook.get("tier_overrides"), dict):
-                    tier_params["tier_overrides"] = playbook.get("tier_overrides")
-                if playbook.get("max_vol") is not None:
-                    tier_params["max_vol"] = float(playbook.get("max_vol"))
         except Exception:
-            tier_params = {}
+            pass
 
-        ranked = rank_universe_v2(
+        # Phase 7: Use build_ai_ranked_universe for EV-based ranking with P(hit) calibration
+        # This ensures single source of truth and proper rejection tracking
+        log(f"[{self.cfg.bot_key}] Using build_ai_ranked_universe for symbol ranking")
+        ranked = self.build_ai_ranked_universe(
             rolling=rolling,
             insights=insights,
-            horizon=self.cfg.horizon,
-            conf_threshold=self.cfg.conf_threshold,
-            tier_params=tier_params if isinstance(tier_params, dict) and tier_params else None,
         )
         
-        # Track universe stats for summary (approximate since rank_universe_v2 doesn't return rejection details)
-        self._last_universe_analyzed = len(rolling) - 1 if "_GLOBAL" in rolling else len(rolling)  # Exclude _GLOBAL
-        self._last_universe_qualified = len(ranked)
-        # Note: Detailed rejection counts come from build_ai_ranked_universe if used,
-        # otherwise we'll show simplified stats in the summary
+        # Universe stats and rejection counts are tracked by build_ai_ranked_universe
+        # and stored in self._last_universe_analyzed, self._last_universe_qualified, self._last_rejection_counts
         
         target_weights = self.construct_target_weights(ranked)
 

@@ -227,6 +227,23 @@ STANDALONE_ROUTERS: Dict[str, Dict[str, Any]] = {
         "endpoints": [
             "GET /api/pnl/dashboard"
         ]
+    },
+    
+    "swing_tuning_router": {
+        "file": "backend/routers/swing_tuning_router.py",
+        "prefix": "/api/eod/tuning",
+        "description": "Autonomous swing bot tuning and optimization",
+        "reason_kept": "Specialized tuning system for swing bots",
+        "endpoints": [
+            "GET /api/eod/tuning/{bot_key}/history",
+            "GET /api/eod/tuning/{bot_key}/metrics",
+            "GET /api/eod/tuning/{bot_key}/outcomes",
+            "GET /api/eod/tuning/{bot_key}/calibration",
+            "POST /api/eod/tuning/{bot_key}/enable",
+            "POST /api/eod/tuning/{bot_key}/override",
+            "POST /api/eod/tuning/{bot_key}/rollback",
+            "POST /api/eod/tuning/run"
+        ]
     }
 }
 
@@ -296,6 +313,7 @@ ENDPOINT_PREFIXES: Dict[str, str] = {
     "/api/page": "page_data_router (standalone)",
     "/api/live-prices": "live_prices_router (standalone)",
     "/api/pnl": "pnl_dashboard_router (standalone)",
+    "/api/eod/tuning": "swing_tuning_router (standalone)",
 }
 
 
