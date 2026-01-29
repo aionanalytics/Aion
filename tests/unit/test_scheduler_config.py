@@ -25,7 +25,7 @@ def test_afternoon_loop_jobs_exist():
 
 
 def test_market_close_jobs_exist():
-    """Test that 4:15 PM (16:15) market close jobs exist for all 3 bots."""
+    """Test that 11:00 PM (23:00) market close jobs exist for all 3 bots."""
     expected_jobs = [
         "eod_1w_close",
         "eod_2w_close",
@@ -55,7 +55,7 @@ def test_afternoon_loop_jobs_configuration():
 
 
 def test_market_close_jobs_configuration():
-    """Test that 4:15 PM market close jobs have correct time and mode."""
+    """Test that 11:00 PM (23:00) market close jobs have correct time and mode."""
     market_close_jobs = [
         job for job in SCHEDULE 
         if job["name"] in ["eod_1w_close", "eod_2w_close", "eod_4w_close"]
@@ -64,7 +64,7 @@ def test_market_close_jobs_configuration():
     assert len(market_close_jobs) == 3, "Expected 3 market close jobs"
     
     for job in market_close_jobs:
-        assert job["time"] == "16:15", f"Job {job['name']} has wrong time: {job['time']}"
+        assert job["time"] == "23:00", f"Job {job['name']} has wrong time: {job['time']}"
         assert job["args"] == ["--mode", "full"], f"Job {job['name']} has wrong mode"
         assert "market close" in job["description"].lower(), (
             f"Job {job['name']} has unexpected description: {job['description']}"
@@ -79,7 +79,7 @@ def test_swing_bot_job_count():
         and job["name"].startswith(("eod_", "bot_"))
     ]
     
-    # 6:00 AM (3 jobs) + 11:35 AM (3 jobs) + 2:30 PM (3 jobs) + 4:15 PM (3 jobs) = 12 jobs
+    # 6:00 AM (3 jobs) + 11:35 AM (3 jobs) + 2:30 PM (3 jobs) + 11:00 PM (3 jobs) = 12 jobs
     assert len(swing_bot_jobs) == 12, f"Expected 12 swing bot jobs, got {len(swing_bot_jobs)}"
 
 
@@ -89,7 +89,7 @@ def test_all_swing_bot_times():
         "06:00": ["eod_1w_full", "eod_2w_full", "eod_4w_full"],
         "11:35": ["bot_loop_1w_1135", "bot_loop_2w_1135", "bot_loop_4w_1135"],
         "14:30": ["bot_loop_1w_1430", "bot_loop_2w_1430", "bot_loop_4w_1430"],
-        "16:15": ["eod_1w_close", "eod_2w_close", "eod_4w_close"],
+        "23:00": ["eod_1w_close", "eod_2w_close", "eod_4w_close"],
     }
     
     for time_str, expected_names in expected_times.items():
