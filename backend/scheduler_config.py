@@ -39,7 +39,7 @@ SCHEDULE = [
     },
     {
         "name": "nightly_full",
-        "time": "17:30",
+        "time": "17:00",
         "module": "backend.jobs.nightly_job",
         "args": [],
         "cwd": PROJECT_ROOT,
@@ -116,7 +116,7 @@ SCHEDULE = [
     *[
         {
             "name": f"eod_{w}_close",
-            "time": "16:15",
+            "time": "23:00",
             "module": f"backend.bots.runner_{w}",
             "args": ["--mode", "full"],
             "cwd": PROJECT_ROOT,
