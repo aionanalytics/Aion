@@ -31,7 +31,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Authentication middleware (enabled by default for security)
+# Authentication middleware (enabled by default, set AUTH_ENABLED=0 to disable)
 AUTH_ENABLED = os.getenv("AUTH_ENABLED", "1") == "1"  # Changed default from "0" to "1"
 if AUTH_ENABLED:
     try:

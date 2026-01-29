@@ -58,6 +58,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [pathname]);
 
   const refreshAuth = async () => {
+    // Skip verification if already on a public route to prevent redirect loops
+    if (PUBLIC_ROUTES.includes(pathname)) {
+      setIsLoading(false);
+      return;
+    }
+
     try {
       setIsLoading(true);
       
@@ -81,7 +87,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setUser(null);
           setIsAdmin(false);
           
-          // Redirect to login if on protected route
+          // Redirect to login only if not already on a public route
           if (!PUBLIC_ROUTES.includes(pathname)) {
             router.push('/auth/login');
           }
@@ -91,7 +97,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUser(null);
         setIsAdmin(false);
         
-        // Redirect to login if on protected route
+        // Redirect to login only if not already on a public route
         if (!PUBLIC_ROUTES.includes(pathname)) {
           router.push('/auth/login');
         }
@@ -101,7 +107,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(null);
       setIsAdmin(false);
       
-      // Redirect to login if on protected route
+      // Only redirect on protected routes to prevent infinite loops
       if (!PUBLIC_ROUTES.includes(pathname)) {
         router.push('/auth/login');
       }

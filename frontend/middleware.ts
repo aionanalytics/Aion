@@ -31,7 +31,7 @@ export function middleware(request: NextRequest) {
   if (
     pathname.startsWith('/_next') ||
     pathname.startsWith('/static') ||
-    pathname.includes('.')
+    pathname.match(/\.(ico|png|jpg|jpeg|gif|svg|woff|woff2|ttf|eot|css|js|map)$/i)
   ) {
     return NextResponse.next();
   }
@@ -45,9 +45,14 @@ export function middleware(request: NextRequest) {
   const accessToken = request.cookies.get('access_token');
   const adminToken = request.cookies.get('admin_token');
   
+  // Helper function to check if a token looks valid (basic format check)
+  const isValidTokenFormat = (token: any) => {
+    return token && token.value && typeof token.value === 'string' && token.value.length > 10;
+  };
+  
   // Admin routes require admin token
   if (ADMIN_ROUTES.some(route => pathname.startsWith(route))) {
-    if (!adminToken) {
+    if (!isValidTokenFormat(adminToken)) {
       // Redirect to login with admin flag
       const loginUrl = new URL('/auth/login', request.url);
       return NextResponse.redirect(loginUrl);
@@ -56,7 +61,7 @@ export function middleware(request: NextRequest) {
   }
   
   // All other routes require user authentication
-  if (!accessToken) {
+  if (!isValidTokenFormat(accessToken)) {
     // Redirect to login
     const loginUrl = new URL('/auth/login', request.url);
     return NextResponse.redirect(loginUrl);

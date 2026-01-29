@@ -22,12 +22,18 @@ from backend.core.auth_service import (
 from backend.core.subscription_service import create_subscription, calculate_subscription_price
 from backend.models.subscription import SubscriptionCreate
 
+import os
+
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
 
 
 class AdminLoginRequest(BaseModel):
     """Admin login request."""
     password: str
+
+
+# Check if we're in development mode (for cookie security)
+IS_DEVELOPMENT = os.getenv("ENVIRONMENT", "production").lower() in ("development", "dev", "local")
 
 
 def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
@@ -37,7 +43,7 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
         key="access_token",
         value=access_token,
         httponly=True,
-        secure=True,  # HTTPS only in production
+        secure=not IS_DEVELOPMENT,  # Allow HTTP in development
         samesite="lax",
         max_age=86400,  # 24 hours
     )
@@ -47,7 +53,7 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
         key="refresh_token",
         value=refresh_token,
         httponly=True,
-        secure=True,
+        secure=not IS_DEVELOPMENT,  # Allow HTTP in development
         samesite="lax",
         max_age=2592000,  # 30 days
     )
@@ -326,7 +332,7 @@ async def admin_login(
         key="admin_token",
         value=token,
         httponly=True,
-        secure=True,
+        secure=not IS_DEVELOPMENT,  # Allow HTTP in development
         samesite="lax",
         max_age=3600,  # 1 hour (matches ADMIN_TOKEN_TTL)
     )
