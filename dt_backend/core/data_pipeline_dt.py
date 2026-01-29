@@ -134,10 +134,11 @@ def _acquire_lock(timeout_s: float = 30.0) -> bool:
             if retry_count % 10 == 1:
                 log(f"[pipeline] ⏳ Waiting for lock (holder pid={pid}, retry {retry_count})")
             
-            # Exponential backoff: 50ms → 100ms → 200ms → ... capped at 500ms
+            # Stepped exponential backoff (increases every 5 retries to avoid too-rapid escalation)
+            # Retries 1-4: 50ms, 5-9: 100ms, 10-14: 200ms, 15-19: 400ms, 20+: 500ms (capped)
+            # This balances quick retries for transient locks vs avoiding CPU thrashing
             sleep_time = min(base_sleep * (2 ** min(retry_count // 5, 3)), 0.5)
             # Add jitter to prevent thundering herd (±20%)
-            import random
             jitter = sleep_time * 0.2 * (2 * random.random() - 1)
             time.sleep(sleep_time + jitter)
 

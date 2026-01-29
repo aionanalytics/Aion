@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -652,7 +653,6 @@ def _append_ledger(
             last_error = e
             if attempt < max_attempts:
                 log(f"[prediction_logger] ⚠️ Ledger write failed (attempt {attempt}/{max_attempts}), retrying: {e}")
-                import time
                 time.sleep(sleep_secs)
             else:
                 log(f"[prediction_logger] ❌ Failed writing ledger after {max_attempts} attempts: {e}")
@@ -661,6 +661,7 @@ def _append_ledger(
     if last_error:
         raise last_error
     
+    # Should not reach here, but return 0 for safety
     return 0
 
 
@@ -906,7 +907,6 @@ def log_predictions(
                 last_error = e
                 if attempt < max_attempts:
                     log(f"[prediction_logger] ⚠️ File write failed (attempt {attempt}/{max_attempts}), retrying: {e}")
-                    import time
                     time.sleep(sleep_secs)
                 else:
                     log(f"[prediction_logger] ❌ Failed writing logs after {max_attempts} attempts: {e}")
