@@ -54,6 +54,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Verify authentication on mount and route changes
   useEffect(() => {
     refreshAuth();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname]);
 
   const refreshAuth = async () => {

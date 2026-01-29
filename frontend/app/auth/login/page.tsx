@@ -99,7 +99,7 @@ export default function LoginPage() {
                 Forgot password?
               </a>
               <a href="/auth/signup" className="block text-sm text-gray-400">
-                Don't have an account? <span className="text-blue-400 hover:text-blue-300">Sign up</span>
+                Don&apos;t have an account? <span className="text-blue-400 hover:text-blue-300">Sign up</span>
               </a>
               <div className="pt-4 border-t border-gray-700 mt-4">
                 <button
