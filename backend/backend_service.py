@@ -31,8 +31,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Authentication middleware (disabled by default, enable with AUTH_ENABLED=1)
-AUTH_ENABLED = os.getenv("AUTH_ENABLED", "0") == "1"
+# Authentication middleware (enabled by default, set AUTH_ENABLED=0 to disable)
+AUTH_ENABLED = os.getenv("AUTH_ENABLED", "1") == "1"  # Changed default from "0" to "1"
 if AUTH_ENABLED:
     try:
         from backend.middleware.auth_middleware import AuthMiddleware
@@ -129,7 +129,19 @@ ROUTERS = [
 ]
 
 # Add optional routers if available
-for router in [model_router, testing_router, intraday_router, replay_router, page_data_router, live_prices_router, swing_tuning_router]:
+for router in [
+    auth_router,             # Authentication endpoints (/api/auth/*)
+    admin_auth_router,       # Admin authentication (/api/admin/*)
+    subscription_router,     # Subscription management
+    webhook_router,          # Stripe webhooks
+    model_router, 
+    testing_router, 
+    intraday_router, 
+    replay_router, 
+    page_data_router, 
+    live_prices_router, 
+    swing_tuning_router
+]:
     if router is not None:
         ROUTERS.append(router)
 
