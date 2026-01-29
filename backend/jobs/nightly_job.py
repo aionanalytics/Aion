@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 
 import json
+import numpy as np
 import subprocess
 import sys
 import time
@@ -25,6 +26,7 @@ import traceback
 import argparse
 from datetime import datetime, timedelta
 from pathlib import Path
+from statistics import pstdev
 from typing import Any, Dict, Optional, List, Tuple
 
 try:
@@ -626,6 +628,50 @@ def run_nightly_job(
             if preds_total <= 0:
                 raise RuntimeError("preds_total==0 (predict_all returned empty).")
 
+            # CRITICAL: Validate predictions BEFORE persisting to rolling cache
+            # This prevents corrupting the rolling file with invalid/flat predictions
+            log("[nightly_job] 🔍 Validating predictions before persistence...")
+            
+            # Fail-loud: ensure at least one horizon looks valid
+            valid_horizons = set()
+            for _sym, pred in preds_by_symbol.items():
+                if not isinstance(pred, dict):
+                    continue
+                for h, blk in pred.items():
+                    if not isinstance(blk, dict):
+                        continue
+                    if bool(blk.get("valid", True)):
+                        valid_horizons.add(str(h))
+            if not valid_horizons:
+                raise RuntimeError("No valid horizons found in predictions output.")
+            
+            # Check for flat predictions (model degeneracy)
+            flat_horizons = []
+            for h in valid_horizons:
+                pred_values = []
+                for _sym, pred in preds_by_symbol.items():
+                    if isinstance(pred, dict) and h in pred:
+                        blk = pred[h]
+                        if isinstance(blk, dict):
+                            pred_ret = blk.get("predicted_return")
+                            if pred_ret is not None and not (np.isnan(pred_ret) or np.isinf(pred_ret)):
+                                pred_values.append(float(pred_ret))
+                
+                if len(pred_values) > 10:  # Need sufficient samples
+                    std = float(pstdev(pred_values))
+                    if std < 0.002:  # <0.2% std indicates flat/degenerate model
+                        flat_horizons.append(f"{h}(std={std:.6f})")
+                        log(f"[nightly_job] ⚠️ Flat predictions detected for {h}: std={std:.6f} (threshold=0.002)")
+            
+            if flat_horizons:
+                raise RuntimeError(
+                    f"Flat predictions detected (model degeneracy) for horizons: {', '.join(flat_horizons)}. "
+                    "Predictions have near-zero variance across symbols. "
+                    "This indicates model failure - NOT persisting to prevent rolling cache corruption."
+                )
+            
+            log(f"[nightly_job] ✅ Validation passed: {len(valid_horizons)} valid horizons, no flat predictions")
+
             # Merge into rolling (keep existing node fields intact)
             updated_syms = 0
             for sym, node in list(rolling.items()):
@@ -662,19 +708,6 @@ def run_nightly_job(
                 save_rolling_nervous(nervous2)
             except Exception as e_hist:
                 log(f"[nightly_job] ⚠️ predictions_history update failed (continuing): {e_hist}")
-
-            # Fail-loud: ensure at least one horizon looks valid
-            valid_horizons = set()
-            for _sym, pred in preds_by_symbol.items():
-                if not isinstance(pred, dict):
-                    continue
-                for h, blk in pred.items():
-                    if not isinstance(blk, dict):
-                        continue
-                    if bool(blk.get("valid", True)):
-                        valid_horizons.add(str(h))
-            if not valid_horizons:
-                raise RuntimeError("No valid horizons found in predictions output.")
 
             payload = {
                 "preds_total": preds_total,
