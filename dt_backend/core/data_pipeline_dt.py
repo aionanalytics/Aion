@@ -26,6 +26,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import random
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -92,6 +93,7 @@ def _acquire_lock(timeout_s: float = 30.0) -> bool:
     lock.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.time() + max(0.0, float(timeout_s))
     retry_count = 0
+    base_sleep = 0.05  # Start with 50ms
 
     while True:
         try:
@@ -101,7 +103,10 @@ def _acquire_lock(timeout_s: float = 30.0) -> bool:
                 os.write(fd, payload.encode("utf-8", errors="ignore"))
             finally:
                 os.close(fd)
-            log("[pipeline] 🔒 Lock acquired")
+            if retry_count > 0:
+                log(f"[pipeline] 🔒 Lock acquired after {retry_count} retries")
+            else:
+                log("[pipeline] 🔒 Lock acquired")
             return True
 
         except FileExistsError:
@@ -115,20 +120,27 @@ def _acquire_lock(timeout_s: float = 30.0) -> bool:
                     pass
 
             if time.time() >= deadline:
-                log(f"[pipeline] ⏰ Lock timeout after {timeout_s}s")
+                log(f"[pipeline] ⏰ Lock timeout after {timeout_s}s ({retry_count} retries)")
                 if get_aggregator:
                     try:
                         agg = get_aggregator()
-                        agg.forward_log("ERROR", f"Lock timeout after {timeout_s}s (holder pid={pid})", "pipeline")
+                        agg.forward_log("ERROR", f"Lock timeout after {timeout_s}s (holder pid={pid}, {retry_count} retries)", "pipeline")
                     except Exception:
                         pass
                 return False
             
-            # Log concurrent access attempts periodically (every 10 retries to avoid spam)
+            # Exponential backoff with jitter to reduce collision
             retry_count += 1
             if retry_count % 10 == 1:
-                log(f"[pipeline] ⏳ Waiting for lock (holder pid={pid})")
-            time.sleep(0.15)
+                log(f"[pipeline] ⏳ Waiting for lock (holder pid={pid}, retry {retry_count})")
+            
+            # Stepped exponential backoff (increases every 5 retries to avoid too-rapid escalation)
+            # Retries 1-4: 50ms, 5-9: 100ms, 10-14: 200ms, 15-19: 400ms, 20+: 500ms (capped)
+            # This balances quick retries for transient locks vs avoiding CPU thrashing
+            sleep_time = min(base_sleep * (2 ** min(retry_count // 5, 3)), 0.5)
+            # Add jitter to prevent thundering herd (±20%)
+            jitter = sleep_time * 0.2 * (2 * random.random() - 1)
+            time.sleep(sleep_time + jitter)
 
         except Exception:
             return False
