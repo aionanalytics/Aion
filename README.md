@@ -44,7 +44,18 @@ The platform will start:
 - **DT Scheduler** - Live market data loop
 - **Replay Service** (port 8020) - Historical replay
 
-Access the dashboard at `http://localhost:8000`
+**HTTPS Support**: The platform now supports HTTPS for secure communication. Generate SSL certificates manually:
+
+```bash
+# Generate self-signed SSL certificates (one-time setup)
+./generate_ssl_cert.sh
+```
+
+Access the dashboard at:
+- **HTTP**: `http://localhost:8000` (fallback if SSL not configured)
+- **HTTPS**: `https://localhost:8000` (recommended, requires trusting certificate)
+
+See [HTTPS_SETUP.md](HTTPS_SETUP.md) for instructions on trusting the self-signed certificate to avoid browser warnings.
 
 **Note:** Port consolidation - Backend now uses unified port 8000 for all endpoints. The previous dual-port setup (8000/8001) has been deprecated to avoid confusion and routing issues.
 

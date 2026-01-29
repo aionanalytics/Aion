@@ -12,7 +12,7 @@ function getDtBackendBaseUrl(): string {
   const url =
     process.env.DT_BACKEND_URL ||
     process.env.NEXT_PUBLIC_DT_BACKEND_URL ||
-    'http://localhost:8010'; // NOTE: localhost default is for development only. Production should set DT_BACKEND_URL or NEXT_PUBLIC_DT_BACKEND_URL explicitly.
+    'https://localhost:8010'; // NOTE: localhost default is for development only. Production should set DT_BACKEND_URL or NEXT_PUBLIC_DT_BACKEND_URL explicitly.
 
   return url.replace(/\/+$/, "");
 }
@@ -22,7 +22,7 @@ function buildTargetUrl(req: NextRequest, pathParts: string[]) {
   const incoming = new URL(req.url);
   
   // pathParts are the URL segments after /api/dt/ (e.g., ['replay', 'status'])
-  // We need to build: http://localhost:8010/api/replay/status
+  // We need to build: https://localhost:8010/api/replay/status
   const path = pathParts.map(encodeURIComponent).join("/");
   const target = new URL(`${base}/api/${path}`);
 
