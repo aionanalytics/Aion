@@ -17,7 +17,7 @@ function getBackendBaseUrl() {
   // Server-side fallback to BACKEND_URL or default localhost
   // NOTE: localhost default is for development only. 
   // Production should set BACKEND_URL or NEXT_PUBLIC_BACKEND_URL explicitly.
-  return process.env.BACKEND_URL || 'http://localhost:8000';
+  return process.env.BACKEND_URL || 'https://localhost:8000';
 }
 
 function buildTargetUrl(req: NextRequest, pathParts: string[]) {
@@ -25,7 +25,7 @@ function buildTargetUrl(req: NextRequest, pathParts: string[]) {
   const incoming = new URL(req.url);
   
   // pathParts are the URL segments after /api/backend/ (e.g., ['dashboard', 'metrics'])
-  // We need to build: http://localhost:8000/api/dashboard/metrics
+  // We need to build: https://localhost:8000/api/dashboard/metrics
   const path = pathParts.map(encodeURIComponent).join("/");
   const target = new URL(`${base}/api/${path}`);
   target.search = incoming.search;

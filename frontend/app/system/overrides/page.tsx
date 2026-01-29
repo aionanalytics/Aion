@@ -7,7 +7,7 @@ import clsx from "clsx";
 
 export default function OverridesPage() {
   const [loading, setLoading] = useState<string | null>(null);
-  const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+  const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "https://localhost:8000";
 
   const runScript = async (task: string) => {
     try {

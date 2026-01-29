@@ -51,3 +51,6 @@ dt_backend/models/
 .coverage
 .coverage.*
 htmlcov/
+
+# SSL certificates (generated locally)
+ssl/

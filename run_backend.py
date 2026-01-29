@@ -103,6 +103,8 @@ def uvicorn_cmd(
     access_log: bool = False,
     reload: bool = False,
     workers: int = 1,
+    ssl_cert: Optional[str] = None,
+    ssl_key: Optional[str] = None,
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -129,6 +131,11 @@ def uvicorn_cmd(
             cmd += ["--workers", str(w)]
     except Exception:
         pass
+
+    # Add SSL/TLS support if certificates are provided
+    if ssl_cert and ssl_key:
+        cmd += ["--ssl-certfile", str(ssl_cert)]
+        cmd += ["--ssl-keyfile", str(ssl_key)]
 
     return cmd
 
@@ -219,11 +226,40 @@ if __name__ == "__main__":
     DT_WORKERS = _env_int("DT_APP_WORKERS", 1)
     REPLAY_WORKERS = _env_int("REPLAY_APP_WORKERS", 1)
 
+    # SSL/TLS Configuration
+    # Auto-detect SSL certificates or use environment variables
+    from pathlib import Path as _Path
+    _here = _Path(__file__).resolve().parent
+    _default_cert = _here / "ssl" / "cert.pem"
+    _default_key = _here / "ssl" / "key.pem"
+    
+    SSL_ENABLED = _env_bool("SSL_ENABLED", default=_default_cert.exists() and _default_key.exists())
+    SSL_CERT_FILE = os.environ.get("SSL_CERT_FILE", str(_default_cert) if _default_cert.exists() else "")
+    SSL_KEY_FILE = os.environ.get("SSL_KEY_FILE", str(_default_key) if _default_key.exists() else "")
+    
+    # Validate SSL files exist if SSL is enabled
+    ssl_cert = None
+    ssl_key = None
+    protocol = "http"
+    
+    if SSL_ENABLED:
+        if _Path(SSL_CERT_FILE).exists() and _Path(SSL_KEY_FILE).exists():
+            ssl_cert = SSL_CERT_FILE
+            ssl_key = SSL_KEY_FILE
+            protocol = "https"
+            print("🔐 SSL/TLS enabled - using HTTPS")
+        else:
+            print(f"⚠️  SSL enabled but certificates not found:")
+            print(f"   - cert: {SSL_CERT_FILE}")
+            print(f"   - key: {SSL_KEY_FILE}")
+            print("   Run ./generate_ssl_cert.sh to generate certificates")
+            print("   Falling back to HTTP...")
+
     print("────────────────────────────────────────")
     print("🚀 Launching AION Analytics system")
-    print(f"   • backend API       → http://{backend_host}:{primary_port} (workers={PRIMARY_WORKERS}, unified port)")
-    print(f"   • dt_backend        → http://{dt_host}:{dt_port} (workers={DT_WORKERS})")
-    print(f"   • replay_service    → http://{replay_host}:{replay_port} (dormant, workers={REPLAY_WORKERS})")
+    print(f"   • backend API       → {protocol}://{backend_host}:{primary_port} (workers={PRIMARY_WORKERS}, unified port)")
+    print(f"   • dt_backend        → {protocol}://{dt_host}:{dt_port} (workers={DT_WORKERS})")
+    print(f"   • replay_service    → {protocol}://{replay_host}:{replay_port} (dormant, workers={REPLAY_WORKERS})")
     if _should_silence_supervisor_agent():
         print("   • logs              → supervisor_agent SILENCED (set SILENCE_SUPERVISOR_AGENT=0 to show)")
     print("────────────────────────────────────────", flush=True)
@@ -253,6 +289,8 @@ if __name__ == "__main__":
             access_log=UVICORN_ACCESS_LOG,
             reload=UVICORN_RELOAD,
             workers=PRIMARY_WORKERS,
+            ssl_cert=ssl_cert,
+            ssl_key=ssl_key,
         ),
         "backend",
         env_overrides={
@@ -261,7 +299,7 @@ if __name__ == "__main__":
             "ENABLE_SCHEDULER": "1",
             "ENABLE_HEARTBEAT": "1",
             "ENABLE_CLOUDSYNC": "1",
-            "PRIMARY_BACKEND_URL": f"http://127.0.0.1:{primary_port}",
+            "PRIMARY_BACKEND_URL": f"{protocol}://127.0.0.1:{primary_port}",
         },
     )
     threading.Thread(target=pipe_output, args=(backend_primary_proc, "backend"), daemon=True).start()
@@ -276,6 +314,8 @@ if __name__ == "__main__":
             access_log=UVICORN_ACCESS_LOG,
             reload=UVICORN_RELOAD,
             workers=DT_WORKERS,
+            ssl_cert=ssl_cert,
+            ssl_key=ssl_key,
         ),
         "dt_backend",
     )
@@ -309,6 +349,8 @@ if __name__ == "__main__":
             access_log=UVICORN_ACCESS_LOG,
             reload=UVICORN_RELOAD,
             workers=REPLAY_WORKERS,
+            ssl_cert=ssl_cert,
+            ssl_key=ssl_key,
         ),
         "replay_service",
     )

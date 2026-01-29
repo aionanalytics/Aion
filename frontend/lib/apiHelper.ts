@@ -156,12 +156,12 @@ export function getBackendUrl(backend: "main" | "dt" = "main"): string {
   if (backend === "dt") {
     return process.env.DT_BACKEND_URL || 
            process.env.NEXT_PUBLIC_DT_BACKEND_URL || 
-           "http://localhost:8010"; // Fallback for local development
+           "https://localhost:8010"; // Fallback for local development
   }
 
   return process.env.BACKEND_URL || 
          process.env.NEXT_PUBLIC_BACKEND_URL || 
-         "http://localhost:8000"; // Fallback for local development
+         "https://localhost:8000"; // Fallback for local development
 }
 
 /**
