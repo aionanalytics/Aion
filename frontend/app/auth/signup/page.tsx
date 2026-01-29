@@ -1,10 +1,10 @@
 "use client";
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useAuth } from '@/lib/auth-context';
 
 export default function SignupPage() {
-  const router = useRouter();
+  const { signup } = useAuth();
   const [formData, setFormData] = useState({
     email: '',
     password: '',
@@ -53,32 +53,14 @@ export default function SignupPage() {
     setLoading(true);
 
     try {
-      const response = await fetch('/api/backend/auth/signup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: formData.email,
-          password: formData.password,
-          subscription_type: formData.subscriptionType,
-          addons: formData.addons,
-          billing_frequency: formData.billingFrequency,
-          early_adopter: true, // Auto-apply if available
-        }),
+      await signup({
+        email: formData.email,
+        password: formData.password,
+        subscription_type: formData.subscriptionType,
+        addons: formData.addons,
+        billing_frequency: formData.billingFrequency,
+        early_adopter: true,
       });
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.detail || 'Signup failed');
-      }
-
-      const data = await response.json();
-      
-      // Store token
-      localStorage.setItem('access_token', data.access_token);
-      localStorage.setItem('refresh_token', data.refresh_token);
-      
-      // Redirect to dashboard
-      router.push('/dashboard');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Signup failed');
     } finally {
