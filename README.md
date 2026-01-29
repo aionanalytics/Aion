@@ -44,7 +44,7 @@ The platform will start:
 - **DT Scheduler** - Live market data loop
 - **Replay Service** (port 8020) - Historical replay
 
-**HTTPS Support**: The platform now supports HTTPS for secure communication. SSL certificates are auto-generated on first run, or you can generate them manually:
+**HTTPS Support**: The platform now supports HTTPS for secure communication. Generate SSL certificates manually:
 
 ```bash
 # Generate self-signed SSL certificates (one-time setup)

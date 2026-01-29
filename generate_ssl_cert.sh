@@ -17,7 +17,7 @@ openssl req -x509 -newkey rsa:4096 -nodes \
   -out ssl/cert.pem \
   -days 365 \
   -subj "/C=US/ST=State/L=City/O=AION Analytics/OU=Development/CN=localhost" \
-  -addext "subjectAltName=DNS:localhost,DNS:127.0.0.1,IP:127.0.0.1,IP:0.0.0.0"
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
 
 echo "✅ SSL certificate generated successfully!"
 echo ""

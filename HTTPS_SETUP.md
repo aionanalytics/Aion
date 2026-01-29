@@ -137,9 +137,7 @@ SSL_KEY_FILE=/path/to/custom/key.pem
 
 ## Frontend Configuration
 
-The frontend automatically detects if the backend is running on HTTPS and adjusts accordingly. 
-
-Update your `.env.local` file in the `frontend/` directory:
+The frontend uses environment variables to determine backend URLs. Update your `.env.local` file in the `frontend/` directory:
 
 ```bash
 # Backend URLs (use HTTPS for secure communication)
@@ -247,6 +245,18 @@ If you get "certificate verify failed" errors:
    ```
 
 ⚠️ **Never disable SSL verification in production!**
+
+### Internal Service Communication
+
+If backend services make internal HTTP requests to themselves (e.g., `PRIMARY_BACKEND_URL`), those requests may fail SSL verification with self-signed certificates. For local development:
+
+1. **Option 1**: Use localhost URLs without SSL verification (Python's `requests` library accepts self-signed certificates by default for localhost)
+2. **Option 2**: Set environment variable to disable SSL verification for internal calls only:
+   ```bash
+   export PYTHONHTTPSVERIFY=0  # Only for development
+   ```
+
+**Note**: The AION backend is designed to handle self-signed certificates for internal communication in development mode.
 
 ## Security Considerations
 

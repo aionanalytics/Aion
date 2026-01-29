@@ -228,24 +228,26 @@ if __name__ == "__main__":
 
     # SSL/TLS Configuration
     # Auto-detect SSL certificates or use environment variables
-    from pathlib import Path as _Path
-    _here = _Path(__file__).resolve().parent
-    _default_cert = _here / "ssl" / "cert.pem"
-    _default_key = _here / "ssl" / "key.pem"
+    # Note: _Path is already imported at the top of the file
+    _ssl_here = _Path(__file__).resolve().parent
+    _default_cert = _ssl_here / "ssl" / "cert.pem"
+    _default_key = _ssl_here / "ssl" / "key.pem"
     
     SSL_ENABLED = _env_bool("SSL_ENABLED", default=_default_cert.exists() and _default_key.exists())
-    SSL_CERT_FILE = os.environ.get("SSL_CERT_FILE", str(_default_cert) if _default_cert.exists() else "")
-    SSL_KEY_FILE = os.environ.get("SSL_KEY_FILE", str(_default_key) if _default_key.exists() else "")
+    SSL_CERT_FILE = os.environ.get("SSL_CERT_FILE") or (str(_default_cert) if _default_cert.exists() else None)
+    SSL_KEY_FILE = os.environ.get("SSL_KEY_FILE") or (str(_default_key) if _default_key.exists() else None)
     
     # Validate SSL files exist if SSL is enabled
     ssl_cert = None
     ssl_key = None
     protocol = "http"
     
-    if SSL_ENABLED:
-        if _Path(SSL_CERT_FILE).exists() and _Path(SSL_KEY_FILE).exists():
-            ssl_cert = SSL_CERT_FILE
-            ssl_key = SSL_KEY_FILE
+    if SSL_ENABLED and SSL_CERT_FILE and SSL_KEY_FILE:
+        cert_path = _Path(SSL_CERT_FILE)
+        key_path = _Path(SSL_KEY_FILE)
+        if cert_path.exists() and key_path.exists():
+            ssl_cert = str(cert_path)
+            ssl_key = str(key_path)
             protocol = "https"
             print("🔐 SSL/TLS enabled - using HTTPS")
         else:
