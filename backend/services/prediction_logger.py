@@ -581,6 +581,7 @@ def _append_ledger(
     """
     Step 3: do NOT append invalid horizons to ledger.
     This prevents polluted calibration / accuracy metrics.
+    Includes retry logic for transient file system failures.
     """
     lines: List[str] = []
 
@@ -632,14 +633,35 @@ def _append_ledger(
         log("[prediction_logger] ❌ Insufficient disk space")
         raise IOError("Disk full: cannot write prediction ledger")
 
-    try:
-        with LEDGER_PATH.open("a", encoding="utf-8") as f:
-            for ln in lines:
-                f.write(ln + "\n")
-        return len(lines)
-    except Exception as e:
-        log(f"[prediction_logger] ❌ Failed writing ledger: {e}")
-        return 0
+    # Retry logic for transient failures
+    max_attempts = 3
+    sleep_secs = 1.0
+    last_error = None
+    
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with LEDGER_PATH.open("a", encoding="utf-8") as f:
+                for ln in lines:
+                    f.write(ln + "\n")
+            
+            if attempt > 1:
+                log(f"[prediction_logger] ✓ Ledger write succeeded on attempt {attempt}/{max_attempts}")
+            return len(lines)
+            
+        except Exception as e:
+            last_error = e
+            if attempt < max_attempts:
+                log(f"[prediction_logger] ⚠️ Ledger write failed (attempt {attempt}/{max_attempts}), retrying: {e}")
+                import time
+                time.sleep(sleep_secs)
+            else:
+                log(f"[prediction_logger] ❌ Failed writing ledger after {max_attempts} attempts: {e}")
+    
+    # If all retries failed, raise the last exception
+    if last_error:
+        raise last_error
+    
+    return 0
 
 
 # ---------------------------------------------------------------------
@@ -861,17 +883,37 @@ def log_predictions(
             log("[prediction_logger] ❌ Insufficient disk space")
             raise IOError("Disk full: cannot write prediction files")
 
-        try:
-            txt = json.dumps(payload, indent=2)
-            latest_path.write_text(txt, encoding="utf-8")
-            log(f"[prediction_logger] 💾 Updated → {latest_path}")
+        # Retry logic for transient failures
+        max_attempts = 3
+        sleep_secs = 1.0
+        last_error = None
+        
+        for attempt in range(1, max_attempts + 1):
+            try:
+                txt = json.dumps(payload, indent=2)
+                latest_path.write_text(txt, encoding="utf-8")
+                log(f"[prediction_logger] 💾 Updated → {latest_path}")
 
-            if write_timestamped:
-                ts_path.write_text(txt, encoding="utf-8")
-                log(f"[prediction_logger] 💾 Saved → {ts_path}")
-
-        except Exception as e:
-            log(f"[prediction_logger] ❌ Failed writing logs: {e}")
+                if write_timestamped:
+                    ts_path.write_text(txt, encoding="utf-8")
+                    log(f"[prediction_logger] 💾 Saved → {ts_path}")
+                
+                if attempt > 1:
+                    log(f"[prediction_logger] ✓ File write succeeded on attempt {attempt}/{max_attempts}")
+                break  # Success, exit retry loop
+                
+            except Exception as e:
+                last_error = e
+                if attempt < max_attempts:
+                    log(f"[prediction_logger] ⚠️ File write failed (attempt {attempt}/{max_attempts}), retrying: {e}")
+                    import time
+                    time.sleep(sleep_secs)
+                else:
+                    log(f"[prediction_logger] ❌ Failed writing logs after {max_attempts} attempts: {e}")
+        
+        # If all retries failed and we have an error, log it but continue (non-critical)
+        if last_error and attempt == max_attempts:
+            log(f"[prediction_logger] ⚠️ Continuing despite write failure: {last_error}")
 
     return payload
 
