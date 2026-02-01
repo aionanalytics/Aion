@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from backend.models.user import User, UserCreate, UserResponse
 from backend.models.token import Token, TokenResponse
 from backend.models.subscription import Subscription
+from utils.logger import Logger
 
 # Load environment variables
 try:
@@ -24,9 +25,18 @@ try:
 except Exception:
     pass
 
+# Create logger for auth service
+logger = Logger(name="auth_service", source="backend")
+
 # Configuration
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", secrets.token_urlsafe(32))
-JWT_ALGORITHM = "HS256"
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "default_secret")
+if JWT_SECRET_KEY == "default_secret":
+    logger.warning(
+        "JWT_SECRET_KEY not set in environment! Using insecure fallback 'default_secret'. "
+        "This is ONLY acceptable for local development. "
+        "Generate a secure key with: python -c 'import secrets; print(secrets.token_urlsafe(32))'"
+    )
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 REFRESH_TOKEN_EXPIRE_DAYS = 30
 
@@ -96,6 +106,15 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
         expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     
     to_encode.update({"exp": expire, "type": "access"})
+    
+    # Log token creation (safely, without exposing sensitive data)
+    logger.debug(
+        f"Creating access token - "
+        f"subject: {to_encode.get('sub', 'unknown')[:8]}..., "
+        f"type: access, "
+        f"expires: {expire.isoformat()}"
+    )
+    
     encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
     return encoded_jwt
 
@@ -113,6 +132,15 @@ def create_refresh_token(data: dict) -> str:
     to_encode = data.copy()
     expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     to_encode.update({"exp": expire, "type": "refresh"})
+    
+    # Log token creation (safely, without exposing sensitive data)
+    logger.debug(
+        f"Creating refresh token - "
+        f"subject: {to_encode.get('sub', 'unknown')[:8]}..., "
+        f"type: refresh, "
+        f"expires: {expire.isoformat()}"
+    )
+    
     encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
     return encoded_jwt
 
@@ -325,7 +353,14 @@ def verify_token(db: Session, token: str) -> Tuple[bool, Optional[str], Optional
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
         user_id: str = payload.get("sub")
         
+        logger.debug(
+            f"Token decoded successfully - "
+            f"subject: {user_id[:8] if user_id else 'unknown'}..., "
+            f"type: {payload.get('type', 'unknown')}"
+        )
+        
         if user_id is None:
+            logger.warning("Token validation failed: missing subject (sub) in payload")
             return False, "invalid_token", None
         
         # Check if token is in database and not revoked
@@ -336,15 +371,28 @@ def verify_token(db: Session, token: str) -> Tuple[bool, Optional[str], Optional
         ).first()
         
         if not token_record:
+            logger.warning(
+                f"Token validation failed: token not found or revoked - "
+                f"subject: {user_id[:8]}..."
+            )
             return False, "token_revoked", None
         
         # Check if token is expired
         if token_record.expires_at < datetime.utcnow():
+            logger.warning(
+                f"Token validation failed: token expired - "
+                f"subject: {user_id[:8]}..., "
+                f"expired_at: {token_record.expires_at.isoformat()}"
+            )
             return False, "token_expired", None
         
         # Get user
         user = db.query(User).filter(User.id == user_id, User.deleted_at.is_(None)).first()
         if not user:
+            logger.warning(
+                f"Token validation failed: user not found or deleted - "
+                f"user_id: {user_id[:8]}..."
+            )
             return False, "user_not_found", None
         
         # Check subscription status
@@ -353,14 +401,29 @@ def verify_token(db: Session, token: str) -> Tuple[bool, Optional[str], Optional
         ).first()
         
         if subscription and subscription.status == "past_due":
+            logger.warning(
+                f"Token validation failed: payment failed - "
+                f"user_id: {user_id[:8]}..., "
+                f"subscription_status: {subscription.status}"
+            )
             return False, "payment_failed", user
         
         if subscription and subscription.status in ["canceled", "suspended"]:
+            logger.warning(
+                f"Token validation failed: subscription inactive - "
+                f"user_id: {user_id[:8]}..., "
+                f"subscription_status: {subscription.status}"
+            )
             return False, "subscription_inactive", user
         
+        logger.debug(f"Token validation successful - user_id: {user_id[:8]}...")
         return True, None, user
         
-    except JWTError:
+    except JWTError as e:
+        logger.warning(
+            f"Token validation failed: invalid token signature or format - "
+            f"error: {type(e).__name__}"
+        )
         return False, "invalid_token", None
 
 
