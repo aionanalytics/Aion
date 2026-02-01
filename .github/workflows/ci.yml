@@ -77,12 +77,24 @@ jobs:
         # Skip empty lines and comments
         if [ -f .env.example ]; then
           echo "Validating .env.example format..."
-          grep -v '^#' .env.example | grep -v '^$' | while read line; do
+          invalid_lines=""
+          while IFS= read -r line; do
+            # Skip empty lines and comments
+            if [[ -z "$line" ]] || [[ "$line" =~ ^[[:space:]]*# ]]; then
+              continue
+            fi
+            # Check if line follows KEY=value format
             if ! echo "$line" | grep -qE '^[A-Z_][A-Z0-9_]*='; then
               echo "ERROR: Invalid .env format in line: $line"
-              exit 1
+              invalid_lines="$invalid_lines\n$line"
             fi
-          done
+          done < .env.example
+          
+          if [ -n "$invalid_lines" ]; then
+            echo "Validation failed! Invalid lines found:"
+            echo -e "$invalid_lines"
+            exit 1
+          fi
           echo ".env.example format is valid"
         fi
     
