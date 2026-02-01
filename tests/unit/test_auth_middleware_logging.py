@@ -68,8 +68,8 @@ class TestAuthMiddlewareLogging:
             assert exc_info.value.status_code == 401
             
             # Verify warning was logged
-            assert mock_logger.warn.called
-            warn_calls = [str(call) for call in mock_logger.warn.call_args_list]
+            assert mock_logger.warning.called
+            warn_calls = [str(call) for call in mock_logger.warning.call_args_list]
             assert any("missing or invalid" in str(call).lower() for call in warn_calls)
     
     @pytest.mark.asyncio
@@ -97,7 +97,7 @@ class TestAuthMiddlewareLogging:
             assert any("authorization header: present" in str(call).lower() for call in debug_calls)
             
             # Ensure the actual token is NOT in any log call
-            all_calls = debug_calls + [str(call) for call in mock_logger.warn.call_args_list]
+            all_calls = debug_calls + [str(call) for call in mock_logger.warning.call_args_list]
             assert not any("secret_token_12345" in str(call) for call in all_calls)
             assert not any("Bearer secret_token_12345" in str(call) for call in all_calls)
     
@@ -167,6 +167,6 @@ class TestAuthMiddlewareLogging:
             assert exc_info.value.status_code == 401
             
             # Verify failure was logged
-            warn_calls = [str(call) for call in mock_logger.warn.call_args_list]
+            warn_calls = [str(call) for call in mock_logger.warning.call_args_list]
             assert any("authentication failed" in str(call).lower() for call in warn_calls)
             assert any("token_expired" in str(call) for call in warn_calls)

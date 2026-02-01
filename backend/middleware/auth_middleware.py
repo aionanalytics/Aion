@@ -85,7 +85,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             logger.debug(f"Authorization header: Missing")
         
         if not auth_header or not auth_header.startswith("Bearer "):
-            logger.warn(f"Missing or invalid authorization header for {path}")
+            logger.warning(f"Missing or invalid authorization header for {path}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Missing or invalid authorization header"
@@ -101,7 +101,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 logger.debug(f"Verifying admin token for {path}")
                 is_valid, reason = verify_admin_token(db, token)
                 if not is_valid:
-                    logger.warn(f"Admin authentication failed for {path}: {reason}")
+                    logger.warning(f"Admin authentication failed for {path}: {reason}")
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
                         detail=f"Admin authentication failed: {reason}"
@@ -112,7 +112,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 logger.debug(f"Verifying user token for {path}")
                 is_valid, reason, user = verify_token(db, token)
                 if not is_valid:
-                    logger.warn(f"User authentication failed for {path}: {reason}")
+                    logger.warning(f"User authentication failed for {path}: {reason}")
                     if reason == "payment_failed":
                         raise HTTPException(
                             status_code=status.HTTP_402_PAYMENT_REQUIRED,
