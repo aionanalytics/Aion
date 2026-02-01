@@ -103,8 +103,8 @@ class TestAuthServiceLogging:
         assert "user123456789" not in log_message  # Full subject should not be there
         assert "test@example.com" not in log_message  # Email should not be in logs
         
-        # Verify partial subject is shown (first 8 chars)
-        assert "user1234" in log_message or "subject" in log_message.lower()
+        # Verify partial subject IS shown (first 8 chars)
+        assert "user1234" in log_message  # First 8 chars should be present
     
     @patch("backend.core.auth_service.logger")
     def test_create_refresh_token_logging(self, mock_logger):
@@ -131,8 +131,8 @@ class TestAuthServiceLogging:
         assert "user987654321" not in log_message  # Full subject should not be there
         assert "refresh@example.com" not in log_message  # Email should not be in logs
         
-        # Verify partial subject is shown
-        assert "user9876" in log_message or "subject" in log_message.lower()
+        # Verify partial subject IS shown (first 8 chars)
+        assert "user9876" in log_message  # First 8 chars should be present
     
     @patch("backend.core.auth_service.logger")
     def test_verify_token_success_logging(self, mock_logger):
