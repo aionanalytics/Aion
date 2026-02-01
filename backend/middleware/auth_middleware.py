@@ -20,6 +20,7 @@ logger = Logger(name="auth_middleware", source="backend")
 # Routes that don't require authentication
 PUBLIC_ROUTES = [
     "/api/auth/login",
+    "/api/auth/admin-login",
     "/api/auth/signup",
     "/api/auth/password-reset",
     "/api/auth/verify",

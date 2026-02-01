@@ -71,6 +71,33 @@ jobs:
       with:
         python-version: '3.11'
     
+    - name: Validate .env format
+      run: |
+        # Check for proper KEY=value format in .env.example
+        # Skip empty lines and comments
+        if [ -f .env.example ]; then
+          echo "Validating .env.example format..."
+          invalid_lines=""
+          while IFS= read -r line; do
+            # Skip empty lines and comments
+            if [[ -z "$line" ]] || [[ "$line" =~ ^[[:space:]]*# ]]; then
+              continue
+            fi
+            # Check if line follows KEY=value format
+            if ! echo "$line" | grep -qE '^[A-Z_][A-Z0-9_]*='; then
+              echo "ERROR: Invalid .env format in line: $line"
+              invalid_lines="$invalid_lines\n$line"
+            fi
+          done < .env.example
+          
+          if [ -n "$invalid_lines" ]; then
+            echo "Validation failed! Invalid lines found:"
+            echo -e "$invalid_lines"
+            exit 1
+          fi
+          echo ".env.example format is valid"
+        fi
+    
     - name: Install security tools
       run: |
         python -m pip install --upgrade pip

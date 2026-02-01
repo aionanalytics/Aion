@@ -420,9 +420,13 @@ def verify_token(db: Session, token: str) -> Tuple[bool, Optional[str], Optional
         return True, None, user
         
     except JWTError as e:
+        # Log error type but avoid exposing potentially sensitive token details
+        error_type = type(e).__name__
+        # Only log safe error information that doesn't reveal token structure
+        safe_message = "Invalid token format or signature"
         logger.warning(
-            f"Token validation failed: invalid token signature or format - "
-            f"error: {type(e).__name__}"
+            f"Token validation failed: {safe_message} - "
+            f"error_type: {error_type}"
         )
         return False, "invalid_token", None
 
