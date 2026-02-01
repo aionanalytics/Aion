@@ -11,6 +11,10 @@ from typing import Callable
 from backend.database.connection import SessionLocal
 from backend.core.auth_service import verify_token
 from backend.core.admin_service import verify_admin_token
+from utils.logger import Logger
+
+# Create logger for auth middleware
+logger = Logger(name="auth_middleware", source="backend")
 
 
 # Routes that don't require authentication
@@ -52,17 +56,36 @@ class AuthMiddleware(BaseHTTPMiddleware):
         """
         path = request.url.path
         
+        # Log incoming request
+        logger.debug(f"Auth middleware processing request: {path}")
+        
         # Skip authentication for public routes
         if any(path.startswith(route) for route in PUBLIC_ROUTES):
+            logger.debug(f"Skipping authentication for public route: {path}")
             return await call_next(request)
         
         # Check if route requires admin auth
         is_admin_route = any(path.startswith(route) for route in ADMIN_ROUTES)
         
+        if is_admin_route:
+            logger.debug(f"Route requires admin authentication: {path}")
+        else:
+            logger.debug(f"Route requires user authentication: {path}")
+        
         # Get authorization header
         auth_header = request.headers.get("authorization")
         
+        # Log authorization header presence (sanitized)
+        if auth_header:
+            if auth_header.startswith("Bearer "):
+                logger.debug(f"Authorization header: Present (Bearer token)")
+            else:
+                logger.debug(f"Authorization header: Present (invalid format)")
+        else:
+            logger.debug(f"Authorization header: Missing")
+        
         if not auth_header or not auth_header.startswith("Bearer "):
+            logger.warning(f"Missing or invalid authorization header for {path}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Missing or invalid authorization header"
@@ -75,16 +98,21 @@ class AuthMiddleware(BaseHTTPMiddleware):
         try:
             if is_admin_route:
                 # Verify admin token
+                logger.debug(f"Verifying admin token for {path}")
                 is_valid, reason = verify_admin_token(db, token)
                 if not is_valid:
+                    logger.warning(f"Admin authentication failed for {path}: {reason}")
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
                         detail=f"Admin authentication failed: {reason}"
                     )
+                logger.debug(f"Admin authentication successful for {path}")
             else:
                 # Verify user token
+                logger.debug(f"Verifying user token for {path}")
                 is_valid, reason, user = verify_token(db, token)
                 if not is_valid:
+                    logger.warning(f"User authentication failed for {path}: {reason}")
                     if reason == "payment_failed":
                         raise HTTPException(
                             status_code=status.HTTP_402_PAYMENT_REQUIRED,
@@ -100,6 +128,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                             status_code=status.HTTP_401_UNAUTHORIZED,
                             detail=f"Authentication failed: {reason}"
                         )
+                
+                logger.debug(f"User authentication successful for {path}")
                 
                 # Add user to request state
                 if user:
