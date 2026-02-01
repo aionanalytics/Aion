@@ -30,6 +30,12 @@ logger = Logger(name="auth_service", source="backend")
 
 # Configuration
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "default_secret")
+if JWT_SECRET_KEY == "default_secret":
+    logger.warning(
+        "JWT_SECRET_KEY not set in environment! Using insecure fallback 'default_secret'. "
+        "This is ONLY acceptable for local development. "
+        "Generate a secure key with: python -c 'import secrets; print(secrets.token_urlsafe(32))'"
+    )
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 REFRESH_TOKEN_EXPIRE_DAYS = 30
